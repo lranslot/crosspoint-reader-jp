@@ -919,3 +919,68 @@ struct PageLine {
 ---
 
 Philosophy: We are building a dedicated e-reader, not a Swiss Army knife. If a feature adds RAM pressure without significantly improving the reading experience, it is Out of Scope.
+## 日本語版フォークについて
+
+このリポジトリは CrossPoint Reader の日本語版フォークです。
+
+### ベース (固定)
+
+| 項目 | 値 |
+|---|---|
+| 上流 | crosspoint-reader/crosspoint-reader |
+| ベースブランチ | develop |
+| **ベースコミット** | **81028d58 (2026-08-10 時点)** |
+| 起点タグとの関係 | 1.5.0 (66abde5f) から 63 コミット先 |
+
+**ベースは意図的に固定している。**
+
+上流の develop は動き続けるが、常時追随はしない。
+`git rebase upstream/develop` や `git merge upstream/develop` を
+提案・実行しないこと。追随が必要かどうかは人間が判断する。
+
+develop を選んだ理由は、日本語本文レンダリングの主要改善が
+1.5.0 に含まれないため:
+
+| PR | 内容 | 1.5.0 |
+|---|---|---|
+| #2665 | native `<ruby>` support (ふりがな) | ❌ |
+| #2710 | CJK 中の `<br>` を段落区切りとして扱う | ❌ |
+| #2768 | CJK 語間スペースの復元 | ❌ |
+| #2781 | ruby の右端はみ出し修正 | ❌ |
+| #2850 | 翻訳ラベルのバッファ長を UTF-8 前提に修正 | ❌ |
+| #2928 | ボタンヒントの枠溢れを折り返しで修正 | ❌ |
+
+### 設計文書
+
+- `docs-jp/xteink-x4-jp-firmware-spec-v0_5.md` — 恒久的な記録 (環境仕様、確立した手順、設計判断)
+- `docs-jp/action-plan-v0_3.md` — 作業計画と現在地
+
+> 版数が上がるとファイル名が変わる。`docs-jp/` 内の最新版を参照すること。
+
+**フォント、i18n、翻訳、ビルド手順に関わる作業の前には spec を読むこと。**
+**次に何をするか迷ったら action-plan の §3 を読むこと。**
+
+### 絶対規則
+
+- ビルド前に `$env:PYTHONUTF8 = "1"` を実行する (日本語 Windows 環境)
+- 英語の翻訳 (`english.yaml`) を削除しない — 復旧時の避難先
+- OTA / SDカード更新機能を削除しない — ロック品には他の更新手段がない
+- ベースコミットを勝手に動かさない (上記参照)
+- 判断が必要な場面では推測せず、実測して報告し、指示を待つ
+
+> **ベース引き上げの経緯**: 初期化時は 596f0d3f を採用したが、
+> 実機確認 (A-3) でボタンヒントの枠溢れを確認したため、
+> #2928 (81028d58) を含む位置まで引き上げた。
+> #2943 (e4aae7ba) は日本語に無関係のため含めていない。
+
+## 上流との関係
+
+上流へ PR を出す場合は、**このリポジトリではなく
+`lranslot/crosspoint-reader` を使う**。日本語版固有の変更が混入しないようにする。
+
+| 提出済み | 内容 | 状態 |
+|---|---|---|
+| PR #2897 | git_branch.py の UTF-8 読み込み | マージ済み |
+| PR #2940 | japanese.yaml | クローズ (方針上の理由) |
+| Issue #2949 | wrappedText が長い分割不能語を落とす | Open |
+| Issue #2950 | SSID 切り詰めがバイト単位 | Open |
