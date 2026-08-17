@@ -2,6 +2,7 @@
 
 #include <BidiUtils.h>
 #include <FontCacheManager.h>
+#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
@@ -21,7 +22,11 @@ namespace {
 constexpr size_t CHUNK_SIZE = 8 * 1024;  // 8KB chunk for reading
 // Cache file magic and version
 constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
-constexpr uint8_t CACHE_VERSION = 3;          // Increment when cache format changes
+// Increment when the cache format changes — and equally when the meaning of what
+// is stored changes. The validation fields describe the viewport, not the wrapping
+// algorithm, so any change to how lines are measured or broken must bump this or
+// stale pageOffsets are silently accepted.
+constexpr uint8_t CACHE_VERSION = 4;
 }  // namespace
 
 void TxtReaderActivity::onEnter() {
@@ -32,6 +37,10 @@ void TxtReaderActivity::onEnter() {
   }
 
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+
+  // Checkbox toggling is .md only: rewriting a .txt the user only meant to read
+  // would be too surprising.
+  isMarkdown = FsHelpers::hasMarkdownExtension(txt->getPath());
 
   txt->setupCacheDir();
 
@@ -65,6 +74,72 @@ void TxtReaderActivity::loop() {
     return;
   }
 
+  // --- Markdown checkbox toggle (short power press) ---
+  // Mirrors the footnote binding in EpubReaderActivity: Down is excluded because
+  // POWER+DOWN is the screenshot chord (caught earlier in main.cpp, guarded twice).
+  if (isMarkdown && SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CHECKBOX &&
+      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    if (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size())) {
+      const unsigned long t0 = millis();
+      const bool ok = writeCheckbox(pageCheckboxes[selectedCheckbox]);
+      LOG_INF("TRS", "checkbox toggle %s in %lu ms", ok ? "ok" : "FAILED", millis() - t0);
+      // Only redraw on success: a silent "it looked like it worked" is worse than
+      // no feedback. render() re-reads the page, which proves the byte landed.
+      if (ok) {
+        requestUpdate();
+      }
+    }
+    return;
+  }
+
+  // --- Checkbox cursor movement ---
+  // Bound to PageBack/PageForward rather than Up/Down so the side-button layout
+  // setting (including SIDE_BUTTONS_DISABLED and the NEXT_PREV swap) is honoured.
+  //
+  // Sample the side buttons under the same rule as ReaderUtils::detectPageTurn:
+  // with longPressButtonBehavior OFF (the default) page turns fire on press, so
+  // reading wasReleased() here would let the page turn on the way down and this
+  // block would never be reached. Touch and tilt are deliberately not consulted —
+  // cursor movement is side-button only.
+  const bool usePress = SETTINGS.longPressButtonBehavior == SETTINGS.OFF;
+  const bool sideNext = usePress ? mappedInput.wasPressed(MappedInputManager::Button::PageForward)
+                                 : mappedInput.wasReleased(MappedInputManager::Button::PageForward);
+  const bool sidePrev = usePress ? mappedInput.wasPressed(MappedInputManager::Button::PageBack)
+                                 : mappedInput.wasReleased(MappedInputManager::Button::PageBack);
+
+  // The event is only consumed when the cursor actually moves; otherwise it falls
+  // through to page turning below. Neither wasPressed() nor wasReleased() clears
+  // state, so the same edge is still visible to detectPageTurn() in this frame.
+  if (isMarkdown && selectedCheckbox >= 0) {
+    const int n = static_cast<int>(pageCheckboxes.size());
+    if (sideNext) {
+      if (selectedCheckbox < n - 1) {
+        const unsigned long t0 = millis();
+        selectedCheckbox++;
+        requestUpdate();
+        LOG_INF("TRS", "checkbox cursor fwd in %lu ms", millis() - t0);
+        return;
+      }
+      // Last checkbox of the last page: swallow it. TxtReaderActivity has no
+      // end-of-book screen, so the next press would call onGoHome() and close the
+      // file with no confirmation — too costly in the middle of editing.
+      if (currentPage >= totalPages - 1) {
+        return;
+      }
+      // Otherwise fall through to the page turn below.
+    } else if (sidePrev) {
+      if (selectedCheckbox > 0) {
+        const unsigned long t0 = millis();
+        selectedCheckbox--;
+        requestUpdate();
+        LOG_INF("TRS", "checkbox cursor back in %lu ms", millis() - t0);
+        return;
+      }
+      // At the first checkbox: fall through to the page turn below.
+    }
+  }
+
   const auto touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
   auto [prevTriggered, nextTriggered, fromTilt] = ReaderUtils::detectPageTurn(mappedInput);
   prevTriggered = prevTriggered || touch.prev;
@@ -75,6 +150,7 @@ void TxtReaderActivity::loop() {
 
   if (prevTriggered && currentPage > 0) {
     currentPage--;
+    enteredFromForward = true;
     requestUpdate();
   } else if (nextTriggered) {
     if (currentPage < totalPages - 1) {
@@ -106,6 +182,27 @@ void TxtReaderActivity::initializeReader() {
       std::max(cachedScreenMargin, static_cast<uint8_t>(UITheme::getInstance().getStatusBarHeight()));
 
   viewportWidth = renderer.getScreenWidth() - cachedOrientedMarginLeft - cachedOrientedMarginRight;
+  // Reserve a fixed gutter for the "> " cursor marker on .md files. Taken out of
+  // viewportWidth before wrapping so the marker never shifts the text, and before
+  // loadPageIndexCache() reads it — viewportWidth is a cache validation field, so
+  // an existing .md index rebuilds exactly once and stays consistent afterwards.
+  markerWidth = isMarkdown ? renderer.getTextAdvanceX(cachedFontId, "> ", EpdFontFamily::REGULAR) : 0;
+  viewportWidth -= markerWidth;
+  // The three mark states are not the same width in a proportional font, so
+  // "- [ ]", "- [x]" and "- [X]" do not measure alike. Left alone, toggling a line
+  // sitting on a wrap boundary would add or remove a visual line while
+  // pageOffsets[currentPage + 1] stays put, and the displaced text would fall out
+  // of every page. Measuring every state at the width of 'x' keeps wrapping fixed.
+  // Computed before loadPageIndexCache()/buildPageIndex() below so the index is
+  // built with the same measurements render() will use.
+  if (isMarkdown) {
+    const int advX = renderer.getTextAdvanceX(cachedFontId, "x", EpdFontFamily::REGULAR);
+    checkboxMarkPadSpace = advX - renderer.getTextAdvanceX(cachedFontId, " ", EpdFontFamily::REGULAR);
+    checkboxMarkPadUpper = advX - renderer.getTextAdvanceX(cachedFontId, "X", EpdFontFamily::REGULAR);
+  } else {
+    checkboxMarkPadSpace = 0;
+    checkboxMarkPadUpper = 0;
+  }
   const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
   const int lineHeight = renderer.getLineHeight(cachedFontId);
 
@@ -124,6 +221,14 @@ void TxtReaderActivity::initializeReader() {
 
   // Load saved progress
   loadProgress();
+
+  // TEMPORARY instrumentation (F-2): confirms the checkbox glyphs are the same
+  // width, i.e. that toggling cannot change how a line wraps.
+  LOG_INF("TRS", "advance space=%d x=%d X=%d | pad space=%d upper=%d marker=%d md=%d",
+          renderer.getTextAdvanceX(cachedFontId, " ", EpdFontFamily::REGULAR),
+          renderer.getTextAdvanceX(cachedFontId, "x", EpdFontFamily::REGULAR),
+          renderer.getTextAdvanceX(cachedFontId, "X", EpdFontFamily::REGULAR), checkboxMarkPadSpace,
+          checkboxMarkPadUpper, markerWidth, isMarkdown ? 1 : 0);
 
   initialized = true;
 }
@@ -167,8 +272,48 @@ void TxtReaderActivity::buildPageIndex() {
   LOG_DBG("TRS", "Built page index: %d pages", totalPages);
 }
 
-bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset) {
+namespace {
+// Match a Markdown task list item at the start of a source line:
+//   [ \t]* ('-' | '*' | '+') ' ' '[' (' ' | 'x' | 'X') ']'
+// On success writes the offset of the byte inside the brackets (relative to the
+// start of the line) to markPos and its state to checked. Hand-written rather
+// than a regex to keep it off the heap.
+bool matchCheckbox(const char* line, size_t len, size_t& markPos, char& mark) {
+  size_t i = 0;
+  while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
+  if (i >= len || (line[i] != '-' && line[i] != '*' && line[i] != '+')) return false;
+  i++;
+  if (i >= len || line[i] != ' ') return false;
+  i++;
+  if (i >= len || line[i] != '[') return false;
+  i++;
+  if (i >= len) return false;
+  const char c = line[i];
+  if (c != ' ' && c != 'x' && c != 'X') return false;
+  if (i + 1 >= len || line[i + 1] != ']') return false;
+  markPos = i;
+  mark = c;
+  return true;
+}
+}  // namespace
+
+// Width to add so a checkbox mark measures as if it were 'x', keeping wrapping
+// identical across all three states. Negative for 'X', which is wider than 'x'.
+int TxtReaderActivity::markPadFor(const char mark) const {
+  switch (mark) {
+    case ' ':
+      return checkboxMarkPadSpace;
+    case 'X':
+      return checkboxMarkPadUpper;
+    default:  // 'x' — already the reference width
+      return 0;
+  }
+}
+
+bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
+                                         std::vector<CheckboxRef>* outCheckboxes) {
   outLines.clear();
+  if (outCheckboxes) outCheckboxes->clear();
   const size_t fileSize = txt->getFileSize();
 
   if (offset >= fileSize) {
@@ -228,6 +373,23 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // Extract line content for display (without CR/LF)
     std::string line(reinterpret_cast<char*>(buffer + pos), displayLen);
 
+    // Detect a task list marker before wrapping: the notation only ever appears
+    // at the head of a source line, which is the first visual line it produces.
+    // The match itself runs for every .md line, not just when outCheckboxes was
+    // asked for: buildPageIndex() must wrap exactly as render() does, or the two
+    // disagree on where pages start.
+    char lineMark = 0;  // 0 when this source line is not a task list item
+    if (isMarkdown) {
+      size_t markPos = 0;
+      char mark = 0;
+      if (matchCheckbox(line.c_str(), displayLen, markPos, mark)) {
+        lineMark = mark;
+        if (outCheckboxes != nullptr) {
+          outCheckboxes->push_back({static_cast<int>(outLines.size()), offset + pos + markPos, mark != ' '});
+        }
+      }
+    }
+
     // Track position within this source line (in bytes from pos)
     size_t lineBytePos = 0;
 
@@ -239,7 +401,12 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
         break;
       }
 
-      int lineWidth = renderer.getTextAdvanceX(cachedFontId, line.c_str(), EpdFontFamily::REGULAR);
+      // Charge the mark at the width of 'x' whatever state it is in, but only
+      // while this segment still holds it — once a break has consumed the mark,
+      // the rest of the source line measures normally.
+      const int markPad = (lineMark != 0 && lineBytePos == 0) ? markPadFor(lineMark) : 0;
+
+      int lineWidth = renderer.getTextAdvanceX(cachedFontId, line.c_str(), EpdFontFamily::REGULAR) + markPad;
 
       if (lineWidth <= viewportWidth) {
         outLines.push_back(line);
@@ -251,7 +418,9 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       // Find break point
       size_t breakPos = line.length();
       while (breakPos > 0 && renderer.getTextAdvanceX(cachedFontId, line.substr(0, breakPos).c_str(),
-                                                      EpdFontFamily::REGULAR) > viewportWidth) {
+                                                      EpdFontFamily::REGULAR) +
+                                     markPad >
+                                 viewportWidth) {
         // Try to break at space
         size_t spacePos = line.rfind(' ', breakPos - 1);
         if (spacePos != std::string::npos && spacePos > 0) {
@@ -311,6 +480,30 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
   return !outLines.empty();
 }
 
+// Flip the single byte inside "[ ]" / "[x]" in place. The notation is the same
+// length either way, so the file size never changes and neither the page index
+// nor its cache (validated on file size, viewport, lines, font) is invalidated.
+bool TxtReaderActivity::writeCheckbox(const CheckboxRef& cb) const {
+  HalFile f = Storage.open(txt->getPath().c_str(), O_RDWR);
+  if (!f) {
+    LOG_ERR("TRS", "checkbox: open failed");
+    return false;
+  }
+  if (!f.seek(cb.markOffset)) {
+    LOG_ERR("TRS", "checkbox: seek failed");
+    f.close();
+    return false;
+  }
+  const char c = cb.checked ? ' ' : 'x';
+  const bool ok = (f.write(&c, 1) == 1);
+  f.flush();
+  f.close();
+  if (!ok) {
+    LOG_ERR("TRS", "checkbox: write failed at %zu", cb.markOffset);
+  }
+  return ok;
+}
+
 void TxtReaderActivity::render(RenderLock&&) {
   if (!txt) {
     return;
@@ -336,7 +529,23 @@ void TxtReaderActivity::render(RenderLock&&) {
   size_t offset = pageOffsets[currentPage];
   size_t nextOffset;
   currentPageLines.clear();
-  loadPageAtOffset(offset, currentPageLines, nextOffset);
+  loadPageAtOffset(offset, currentPageLines, nextOffset, isMarkdown ? &pageCheckboxes : nullptr);
+
+  // Only (re)seat the cursor when the page actually changed. render() also runs
+  // for a plain redraw — moving the cursor calls requestUpdate(), so resetting
+  // unconditionally here would undo the move before it ever reached the screen.
+  // Entering a page backwards lands on its last checkbox, so a reader walking
+  // towards the start is not thrown back to the top each time.
+  const int checkboxCount = static_cast<int>(pageCheckboxes.size());
+  if (checkboxCount == 0) {
+    selectedCheckbox = -1;
+  } else if (checkboxPageStamp != currentPage) {
+    selectedCheckbox = enteredFromForward ? checkboxCount - 1 : 0;
+  } else if (selectedCheckbox >= checkboxCount) {
+    selectedCheckbox = checkboxCount - 1;  // defensive clamp
+  }
+  checkboxPageStamp = currentPage;
+  enteredFromForward = false;
 
   renderer.clearScreen();
   renderPage();
@@ -349,12 +558,20 @@ void TxtReaderActivity::renderPage() {
   const int lineHeight = renderer.getLineHeight(cachedFontId);
   const int contentWidth = viewportWidth;
 
+  // Text starts after the marker gutter (zero-width unless this is a .md file),
+  // so the cursor marker never overlaps the text at any alignment.
+  const int textLeft = cachedOrientedMarginLeft + markerWidth;
+  const int selectedLine = (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size()))
+                               ? pageCheckboxes[selectedCheckbox].lineIndex
+                               : -1;
+
   // Render text lines with alignment
   auto renderLines = [&]() {
     int y = cachedOrientedMarginTop;
+    int lineIndex = 0;
     for (const auto& line : currentPageLines) {
       if (!line.empty()) {
-        int x = cachedOrientedMarginLeft;
+        int x = textLeft;
         const bool lineIsRtl = BidiUtils::startsWithRtl(line.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
         uint8_t effectiveAlignment = cachedParagraphAlignment;
         if (lineIsRtl && (effectiveAlignment == CrossPointSettings::LEFT_ALIGN ||
@@ -370,11 +587,11 @@ void TxtReaderActivity::renderPage() {
             // x already set to left margin
             break;
           case CrossPointSettings::CENTER_ALIGN: {
-            x = cachedOrientedMarginLeft + (contentWidth - textWidth) / 2;
+            x = textLeft + (contentWidth - textWidth) / 2;
             break;
           }
           case CrossPointSettings::RIGHT_ALIGN: {
-            x = cachedOrientedMarginLeft + contentWidth - textWidth;
+            x = textLeft + contentWidth - textWidth;
             break;
           }
           case CrossPointSettings::JUSTIFIED:
@@ -383,9 +600,15 @@ void TxtReaderActivity::renderPage() {
             break;
         }
 
+        // Drawn into the reserved gutter as a separate call: the line string is
+        // never modified, so wrapping stays identical whatever is selected.
+        if (lineIndex == selectedLine) {
+          renderer.drawText(cachedFontId, cachedOrientedMarginLeft, y, "> ");
+        }
         renderer.drawText(cachedFontId, x, y, line.c_str());
       }
       y += lineHeight;
+      lineIndex++;
     }
   };
 
