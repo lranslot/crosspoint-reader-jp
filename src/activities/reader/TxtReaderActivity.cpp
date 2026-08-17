@@ -39,8 +39,10 @@ void TxtReaderActivity::onEnter() {
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
 
   // Checkbox toggling is .md only: rewriting a .txt the user only meant to read
-  // would be too surprising.
-  isMarkdown = FsHelpers::hasMarkdownExtension(txt->getPath());
+  // would be too surprising. It is also off for anything read through a converted
+  // copy — writeCheckbox() writes into the source file, but the offsets belong to
+  // the converted bytes, so writing them back would corrupt it.
+  isMarkdown = FsHelpers::hasMarkdownExtension(txt->getPath()) && !txt->isConverted();
 
   txt->setupCacheDir();
 

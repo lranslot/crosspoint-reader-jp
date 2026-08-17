@@ -102,6 +102,18 @@ std::unique_ptr<Txt> ReaderActivity::loadTxt(const std::string& path) {
     LOG_ERR("READER", "Failed to allocate TXT object");
     return nullptr;
   }
+  // First open of a Shift-JIS file: converting it to UTF-8 takes a moment, so show
+  // the same indexing popup rather than waiting silently on the home screen. Same
+  // reasoning as loadEpub — the cachePath/hash is known at construction, so the
+  // sidecar check is valid before load(). Absent sidecar means either a UTF-8 file
+  // (load() returns almost immediately, and the popup is harmless) or a conversion
+  // about to run.
+  const bool unconverted = !Storage.exists((txt->getCachePath() + "/encoding.bin").c_str());
+  if (unconverted) {
+    // The popup replaces the restored Quick Resume frame, so the reader must clean it.
+    allowFastInitialRefresh = false;
+    GUI.drawPopup(renderer, tr(STR_INDEXING));
+  }
   if (txt->load()) {
     return txt;
   }

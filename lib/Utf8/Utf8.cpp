@@ -1,8 +1,29 @@
 #include "Utf8.h"
 
+#include "Cp932Table.h"
 #include "Utf8ComposeTable.h"
 
 namespace {
+// Halfwidth katakana occupy a single byte in CP932 and map to a contiguous
+// Unicode run, so they need no table.
+constexpr uint8_t kSjisKanaFirst = 0xA1;
+constexpr uint8_t kSjisKanaLast = 0xDF;
+constexpr uint32_t kSjisKanaBase = 0xFF61;
+
+bool sjisIsLead(const uint8_t b) { return (b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC); }
+bool sjisIsTrail(const uint8_t b) { return (b >= 0x40 && b <= 0x7E) || (b >= 0x80 && b <= 0xFC); }
+bool sjisIsSingle(const uint8_t b) { return b <= 0x7F || (b >= kSjisKanaFirst && b <= kSjisKanaLast); }
+
+// Number of bytes in the UTF-8 sequence a lead byte starts, or 0 if it is not a
+// valid lead. Overlong forms and the surrogate range are rejected by the caller.
+int utf8SeqLen(const uint8_t b) {
+  if (b < 0x80) return 1;
+  if ((b & 0xE0) == 0xC0) return 2;
+  if ((b & 0xF0) == 0xE0) return 3;
+  if ((b & 0xF8) == 0xF0) return 4;
+  return 0;
+}
+
 // Look up the canonical composition of (base + combining mark), or 0 if none.
 uint32_t utf8ComposePair(const uint32_t base, const uint32_t mark) {
   if (base > 0xFFFF || mark > 0xFFFF) return 0;
@@ -21,7 +42,120 @@ uint32_t utf8ComposePair(const uint32_t base, const uint32_t mark) {
   }
   return 0;
 }
+
+// Strict UTF-8 validity check over a prefix. Rejects overlong encodings, the
+// surrogate range and anything past U+10FFFF, because those are exactly the shapes
+// Shift-JIS bytes tend to produce when misread as UTF-8. A sequence cut off by the
+// end of the buffer is not an error — the caller only ever sees a prefix.
+bool looksLikeUtf8(const uint8_t* data, const size_t len) {
+  size_t i = 0;
+  while (i < len) {
+    const uint8_t b = data[i];
+    const int need = utf8SeqLen(b);
+    if (need == 0) return false;  // continuation byte or 0xF8-0xFF in lead position
+    if (need == 1) {
+      i++;
+      continue;
+    }
+    if (i + need > len) return true;  // truncated by the buffer edge, not by corruption
+    uint32_t cp = b & (0xFF >> (need + 1));
+    for (int k = 1; k < need; k++) {
+      const uint8_t c = data[i + k];
+      if ((c & 0xC0) != 0x80) return false;
+      cp = (cp << 6) | (c & 0x3F);
+    }
+    if (need == 2 && cp < 0x80) return false;
+    if (need == 3 && cp < 0x800) return false;
+    if (need == 4 && cp < 0x10000) return false;
+    if (cp > 0x10FFFF) return false;
+    if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+    i += need;
+  }
+  return true;
+}
+
+// Shift-JIS validity over a prefix, under the same truncation rule.
+bool looksLikeShiftJis(const uint8_t* data, const size_t len) {
+  size_t i = 0;
+  while (i < len) {
+    const uint8_t b = data[i];
+    if (sjisIsSingle(b)) {
+      i++;
+      continue;
+    }
+    if (!sjisIsLead(b)) return false;
+    if (i + 1 >= len) return true;  // lead byte at the buffer edge
+    if (!sjisIsTrail(data[i + 1])) return false;
+    i += 2;
+  }
+  return true;
+}
 }  // namespace
+
+size_t utf8BomLength(const uint8_t* data, const size_t len) {
+  if (data != nullptr && len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) return 3;
+  return 0;
+}
+
+TextEncoding detectTextEncoding(const uint8_t* data, const size_t len) {
+  if (data == nullptr || len == 0) return TextEncoding::Utf8;
+
+  if (utf8BomLength(data, len) != 0) return TextEncoding::Utf8;
+  // UTF-16 is out of scope: report it as UTF-8 and leave the file alone rather
+  // than half-converting it.
+  if (len >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF))) {
+    return TextEncoding::Utf8;
+  }
+
+  bool allAscii = true;
+  for (size_t i = 0; i < len; i++) {
+    if (data[i] >= 0x80) {
+      allAscii = false;
+      break;
+    }
+  }
+  if (allAscii) return TextEncoding::Utf8;
+
+  if (looksLikeUtf8(data, len)) return TextEncoding::Utf8;
+  if (looksLikeShiftJis(data, len)) return TextEncoding::ShiftJis;
+  return TextEncoding::Utf8;
+}
+
+size_t cp932ToUtf8(const uint8_t* data, const size_t len, std::string& out, const bool flush) {
+  if (data == nullptr || len == 0) return 0;
+
+  size_t i = 0;
+  while (i < len) {
+    const uint8_t b = data[i];
+
+    if (b <= 0x7F) {
+      out.push_back(static_cast<char>(b));
+      i++;
+      continue;
+    }
+    if (b >= kSjisKanaFirst && b <= kSjisKanaLast) {
+      utf8AppendCodepoint(kSjisKanaBase + (b - kSjisKanaFirst), out);
+      i++;
+      continue;
+    }
+    if (!sjisIsLead(b)) {
+      utf8AppendCodepoint(REPLACEMENT_GLYPH, out);  // stray trail byte
+      i++;
+      continue;
+    }
+    if (i + 1 >= len) {
+      // Lead byte with no trail byte in this buffer: hand it back to the caller so
+      // it can be re-fed with the next chunk, unless this is the end of the file.
+      if (!flush) return i;
+      utf8AppendCodepoint(REPLACEMENT_GLYPH, out);
+      return len;
+    }
+    const uint16_t cp = cp932Lookup(b, data[i + 1]);
+    utf8AppendCodepoint(cp != 0 ? cp : REPLACEMENT_GLYPH, out);
+    i += 2;
+  }
+  return len;
+}
 
 std::string utf8ComposeNfc(const std::string& in) {
   // Fast path: NFC composition can only change text that contains a combining

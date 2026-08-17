@@ -67,6 +67,38 @@ inline bool utf8IsCjkCodepoint(const uint32_t cp) {
          || (cp >= 0x30000 && cp <= 0x323AF);  // CJK Extensions G-H
 }
 
+// --- Plain-text encoding detection and Shift-JIS conversion ---
+
+enum class TextEncoding : uint8_t {
+  Utf8,      // includes ASCII, and anything we decline to convert
+  ShiftJis,  // CP932
+};
+
+// Length of a UTF-8 BOM at the start of the buffer (3), otherwise 0.
+size_t utf8BomLength(const uint8_t* data, size_t len);
+
+// Guess the encoding of a plain-text file from a prefix of its bytes (4KB is
+// plenty). UTF-8 is tried first and wins whenever the bytes are valid: real
+// Japanese Shift-JIS leads with 0x81-0x9F, which are continuation bytes in UTF-8
+// and never appear on their own, so the two are easy to tell apart. Anything that
+// is neither valid UTF-8 nor valid Shift-JIS is reported as Utf8 — leaving a file
+// looking broken is better than rewriting it on a guess.
+//
+// A multi-byte sequence cut off by the end of the buffer is tolerated, so passing
+// an arbitrary prefix is safe.
+TextEncoding detectTextEncoding(const uint8_t* data, size_t len);
+
+// Convert CP932 bytes to UTF-8, appending to `out`.
+//
+// Stops short of any trailing byte that cannot be decoded yet (a lead byte with no
+// trail byte in this buffer) and reports how much was consumed, so a caller can
+// stream a file in fixed-size chunks and carry the remainder into the next one.
+// Undefined pairs and stray trail bytes each produce U+FFFD.
+//
+// When `flush` is true the buffer is treated as the end of the file and a dangling
+// lead byte is emitted as U+FFFD rather than held back.
+size_t cp932ToUtf8(const uint8_t* data, size_t len, std::string& out, bool flush);
+
 // Returns true for Unicode combining diacritical marks that should not advance the cursor.
 inline bool utf8IsCombiningMark(const uint32_t cp) {
   return (cp >= 0x0300 && cp <= 0x036F)      // Combining Diacritical Marks
