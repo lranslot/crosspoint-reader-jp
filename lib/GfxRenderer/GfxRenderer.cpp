@@ -1944,6 +1944,129 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   return widthPx;
 }
 
+size_t GfxRenderer::findWrapOffset(const int fontId, const char* text, const int maxWidth,
+                                   const EpdFontFamily::Style style, const bool preferSpace,
+                                   const int extraWidth) const {
+  if (text == nullptr || *text == '\0' || maxWidth <= 0) return 0;
+
+  const char* const begin = text;
+  const size_t totalLen = strlen(text);
+
+  // resolveVisualText() bidi-reorders (and Arabic-shapes) the codepoint stream, so
+  // an offset into the visual order means nothing to a caller holding the logical
+  // string. These lines keep the old quadratic prefix search: rare enough in plain
+  // text that being slow beats being wrong.
+  bool hasRtlBytes = false;
+  for (const unsigned char* q = reinterpret_cast<const unsigned char*>(text); *q; ++q) {
+    if (*q >= 0xD6 && *q <= 0xDB) {
+      hasRtlBytes = true;
+      break;
+    }
+  }
+  if (hasRtlBytes) {
+    size_t breakPos = totalLen;
+    std::string prefix;
+    while (breakPos > 0) {
+      prefix.assign(begin, breakPos);
+      if (getTextAdvanceX(fontId, prefix.c_str(), style) + extraWidth <= maxWidth) break;
+      if (preferSpace) {
+        const size_t spacePos = std::string(begin, totalLen).rfind(' ', breakPos - 1);
+        if (spacePos != std::string::npos && spacePos > 0) {
+          breakPos = spacePos;
+          continue;
+        }
+      }
+      breakPos--;
+      while (breakPos > 0 && (static_cast<unsigned char>(begin[breakPos]) & 0xC0) == 0x80) breakPos--;
+    }
+    return breakPos == 0 ? 0 : breakPos;
+  }
+
+  // Match the font drawText would use, resolved once for the whole string: doing
+  // it per position could switch fonts partway and change the widths.
+  const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return totalLen;
+  }
+  const auto& font = fontIt->second;
+  const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
+
+  // Offsets at which a break is allowed, tracked as the scan advances.
+  size_t lastFittingOffset = 0;  // last codepoint boundary whose prefix fits
+  size_t lastFittingSpace = 0;   // last space (past offset 0) whose prefix fits
+  bool overflowed = false;
+
+  auto sdIt = sdCardFonts_.find(resolvedFontId);
+  if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
+    // Accumulate in 12.4 fixed point and round once per comparison, exactly as the
+    // measuring path does. Summing rounded pixels instead would drift.
+    const uint8_t styleIdx = resolveSdCardStyle(*sdIt->second, style);
+    int32_t widthFP = 0;
+    const char* cursor = text;
+    while (*cursor) {
+      const size_t offset = static_cast<size_t>(cursor - begin);
+      if (fp4::toPixel(widthFP) + extraWidth > maxWidth) {
+        overflowed = true;
+        break;
+      }
+      lastFittingOffset = offset;
+      if (offset > 0 && begin[offset] == ' ') lastFittingSpace = offset;
+
+      const uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor));
+      if (cp == 0) break;
+      if (BidiUtils::isTransparentMark(cp)) continue;
+      int32_t advFP = sdIt->second->getAdvance(cp, styleIdx);
+      if (advFP == 0 && !utf8IsCombiningMark(cp)) {
+        const EpdGlyph* glyph = font.getGlyph(cp, style);
+        advFP = glyph ? glyph->advanceX : 0;
+      }
+      widthFP += isSupSub ? (advFP + 1) / 2 : advFP;
+    }
+    if (!overflowed && fp4::toPixel(widthFP) + extraWidth <= maxWidth) return totalLen;
+  } else {
+    // Differential rounding: the width if the scan stopped here is the running
+    // pixel total plus the pending advance, snapped — see getTextAdvanceX().
+    uint32_t prevCp = 0;
+    int widthPx = 0;
+    int32_t prevAdvanceFP = 0;
+    const char* cursor = text;
+    while (*cursor) {
+      const size_t offset = static_cast<size_t>(cursor - begin);
+      if (widthPx + fp4::toPixel(prevAdvanceFP) + extraWidth > maxWidth) {
+        overflowed = true;
+        break;
+      }
+      lastFittingOffset = offset;
+      if (offset > 0 && begin[offset] == ' ') lastFittingSpace = offset;
+
+      uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor));
+      if (cp == 0) break;
+      if (BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) continue;
+      // May consume a further codepoint, advancing cursor past the ligature pair.
+      // The offset recorded above is therefore always in front of a whole pair,
+      // never between its halves — see the note on the declaration.
+      cp = font.applyLigatures(cp, cursor, style);
+
+      if (prevCp != 0) {
+        const auto kernFP = font.getKerning(prevCp, cp, style);
+        widthPx += fp4::toPixel(prevAdvanceFP + kernFP);
+      }
+      const EpdGlyph* glyph = font.getGlyph(cp, style);
+      prevAdvanceFP = glyph ? glyph->advanceX : 0;
+      if (isSupSub) prevAdvanceFP = (prevAdvanceFP + 1) / 2;
+      prevCp = cp;
+    }
+    if (!overflowed && widthPx + fp4::toPixel(prevAdvanceFP) + extraWidth <= maxWidth) return totalLen;
+  }
+
+  // Prefer the last space that fits, mirroring the caller's rfind(' ') loop: a
+  // space at offset 0 is skipped there, so it is skipped here too.
+  if (preferSpace && lastFittingSpace > 0) return lastFittingSpace;
+  return lastFittingOffset;
+}
+
 int GfxRenderer::getFontAscenderSize(const int fontId) const {
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) {

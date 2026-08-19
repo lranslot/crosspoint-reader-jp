@@ -26,7 +26,8 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // is stored changes. The validation fields describe the viewport, not the wrapping
 // algorithm, so any change to how lines are measured or broken must bump this or
 // stale pageOffsets are silently accepted.
-constexpr uint8_t CACHE_VERSION = 4;
+// v5: F-7 replaced the wrapping algorithm, which can move a break by one character.
+constexpr uint8_t CACHE_VERSION = 5;
 }  // namespace
 
 void TxtReaderActivity::onEnter() {
@@ -396,64 +397,48 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     size_t lineBytePos = 0;
 
     // Emit at least one visual line for each source line (including blank lines),
-    // then continue with wrapping when needed.
+    // then continue with wrapping when needed. The remainder is carried as an
+    // offset into `line` rather than by rebuilding the string each time, which
+    // used to make a long paragraph quadratic in memcpy alone.
     do {
-      if (line.empty()) {
+      if (displayLen == 0) {
         outLines.emplace_back();
         break;
       }
+
+      const char* segment = line.c_str() + lineBytePos;
+      const size_t segmentLen = displayLen - lineBytePos;
 
       // Charge the mark at the width of 'x' whatever state it is in, but only
       // while this segment still holds it — once a break has consumed the mark,
       // the rest of the source line measures normally.
       const int markPad = (lineMark != 0 && lineBytePos == 0) ? markPadFor(lineMark) : 0;
 
-      int lineWidth = renderer.getTextAdvanceX(cachedFontId, line.c_str(), EpdFontFamily::REGULAR) + markPad;
+      size_t breakPos =
+          renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR, true, markPad);
 
-      if (lineWidth <= viewportWidth) {
-        outLines.push_back(line);
+      if (breakPos >= segmentLen) {
+        outLines.emplace_back(segment, segmentLen);
         lineBytePos = displayLen;  // Consumed entire display content
-        line.clear();
         break;
       }
 
-      // Find break point
-      size_t breakPos = line.length();
-      while (breakPos > 0 && renderer.getTextAdvanceX(cachedFontId, line.substr(0, breakPos).c_str(),
-                                                      EpdFontFamily::REGULAR) +
-                                     markPad >
-                                 viewportWidth) {
-        // Try to break at space
-        size_t spacePos = line.rfind(' ', breakPos - 1);
-        if (spacePos != std::string::npos && spacePos > 0) {
-          breakPos = spacePos;
-        } else {
-          // Break at character boundary for UTF-8
-          breakPos--;
-          // Make sure we don't break in the middle of a UTF-8 sequence
-          while (breakPos > 0 && (line[breakPos] & 0xC0) == 0x80) {
-            breakPos--;
-          }
-        }
-      }
-
       if (breakPos == 0) {
-        breakPos = 1;
+        breakPos = 1;  // always make progress, as the previous loop did
       }
 
-      outLines.push_back(line.substr(0, breakPos));
+      outLines.emplace_back(segment, breakPos);
 
       // Skip space at break point
       size_t skipChars = breakPos;
-      if (breakPos < line.length() && line[breakPos] == ' ') {
+      if (breakPos < segmentLen && segment[breakPos] == ' ') {
         skipChars++;
       }
       lineBytePos += skipChars;
-      line = line.substr(skipChars);
-    } while (!line.empty() && static_cast<int>(outLines.size()) < linesPerPage);
+    } while (lineBytePos < displayLen && static_cast<int>(outLines.size()) < linesPerPage);
 
     // Determine how much of the source buffer we consumed
-    if (line.empty()) {
+    if (lineBytePos >= displayLen) {
       // Fully consumed this source line, move past the newline
       pos = lineEnd + 1;
     } else {

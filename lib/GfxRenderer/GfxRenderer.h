@@ -257,6 +257,40 @@ class GfxRenderer {
   /// Returns the kerning adjustment between two adjacent codepoints.
   int getKerning(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;
   int getTextAdvanceX(int fontId, const char* text, EpdFontFamily::Style style) const;
+  /// Scans \p text forward and returns the byte offset it must break at to fit
+  /// within \p maxWidth. O(n) in the bytes scanned, unlike measuring every
+  /// candidate prefix, which is O(n^2) and makes long paragraphs quadratic.
+  ///
+  /// \p preferSpace breaks at the last space that still fits rather than
+  /// mid-word; without one (or with the only space at offset 0) it falls back to
+  /// the last codepoint boundary that fits. \p extraWidth is added to the running
+  /// width before every comparison — the markdown checkbox wrap correction passes
+  /// the mark's width delta through it.
+  ///
+  /// Returns strlen(text) when the whole string fits. Returns 0 when not even the
+  /// first codepoint does; callers that must make progress advance by one
+  /// themselves, as the TXT reader's wrap loop always has.
+  ///
+  /// Width accounting mirrors getTextAdvanceX() exactly — same resolved font
+  /// (chosen once for the whole string), same fixed-point accumulation, same
+  /// differential rounding — so a break here lands where measuring every prefix
+  /// would have put it, with one deliberate exception:
+  ///
+  /// A ligature pair is indivisible. Measuring prefixes could break between the
+  /// two codepoints of an ff/fi/fl pair, since a prefix ending mid-pair simply
+  /// does not form the ligature; a forward scan has already consumed both by the
+  /// time it knows the width, so it breaks before the pair instead. The line ends
+  /// one character earlier in that case. Only built-in fonts have ligatures — SD
+  /// card fonts are measured from the advance table, which has none — so CJK text
+  /// is unaffected.
+  ///
+  /// RTL text is measured after bidi reordering, where an offset into the visual
+  /// order says nothing about the logical string the caller holds. Such lines fall
+  /// back to prefix measurement and stay O(n^2); they are rare in plain text, and
+  /// a wrong offset would be worse than a slow one.
+  size_t findWrapOffset(int fontId, const char* text, int maxWidth,
+                        EpdFontFamily::Style style = EpdFontFamily::REGULAR, bool preferSpace = true,
+                        int extraWidth = 0) const;
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   int getLineHeight(int fontId, float compression) const;
