@@ -459,6 +459,15 @@ bool Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
     return false;
   }
 
+  // Reuse the handle when a sequential run is in progress. The caller still passes
+  // an arbitrary offset, so the seek happens either way — only the open is saved.
+  if (sequentialFile) {
+    if (!sequentialFile.seek(offset)) {
+      return false;
+    }
+    return sequentialFile.read(buffer, length) > 0;
+  }
+
   HalFile file;
   // readPath, not filepath: offsets are measured against the converted copy when
   // the source was Shift-JIS.
@@ -472,4 +481,24 @@ bool Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
 
   size_t bytesRead = file.read(buffer, length);
   return bytesRead > 0;
+}
+
+bool Txt::beginSequentialRead() {
+  if (!loaded) {
+    return false;
+  }
+  if (sequentialFile) {
+    return true;  // already open; scopes are not nested today, but be tolerant
+  }
+  if (!Storage.openFileForRead("TXT", readPath, sequentialFile)) {
+    LOG_ERR("TXT", "Sequential read unavailable for %s, reopening per read", readPath.c_str());
+    return false;
+  }
+  return true;
+}
+
+void Txt::endSequentialRead() {
+  if (sequentialFile) {
+    sequentialFile.close();
+  }
 }

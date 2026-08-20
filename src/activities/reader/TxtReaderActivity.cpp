@@ -247,6 +247,11 @@ void TxtReaderActivity::buildPageIndex() {
 
   GUI.drawPopup(renderer, tr(STR_INDEXING));
 
+  // One handle for the whole sweep instead of an open per page. Scoped so every
+  // exit below — including the two breaks — closes it, and so it is never held
+  // while the reader could be writing back a checkbox.
+  const Txt::SequentialReadScope sequentialRead(*txt);
+
   while (offset < fileSize) {
     std::vector<std::string> tempLines;
     size_t nextOffset = offset;

@@ -16,6 +16,10 @@ class Txt {
   bool converted = false;
   size_t fileSize = 0;  // size of readPath, i.e. what offsets are measured against
 
+  // Open only for the duration of a sequential read run. Mutable because seeking
+  // and reading it is an implementation detail of the logically const readContent.
+  mutable HalFile sequentialFile;
+
   // Detect the source encoding and, for Shift-JIS, produce (or reuse) a UTF-8 copy
   // in the cache. Returns false only on I/O failure; a file we decline to convert
   // is a success that leaves readPath alone.
@@ -51,4 +55,27 @@ class Txt {
 
   // Read content from file
   [[nodiscard]] bool readContent(uint8_t* buffer, size_t offset, size_t length) const;
+
+  // Keep one handle open across a run of reads instead of reopening per call.
+  // Worth it for the index build, which reads the whole file a page at a time.
+  //
+  // Deliberately not held for the life of the activity: the markdown checkbox
+  // toggle reopens the same path O_RDWR to write a byte, and leaving a read handle
+  // open across that is asking SdFat for trouble. The index build and a toggle
+  // never overlap, so the window stays inside buildPageIndex().
+  //
+  // Failing to begin is not an error — reads simply fall back to reopening.
+  bool beginSequentialRead();
+  void endSequentialRead();
+
+  // Scope guard so every exit from the index build closes the handle.
+  class SequentialReadScope {
+    Txt& txt;
+
+   public:
+    explicit SequentialReadScope(Txt& t) : txt(t) { txt.beginSequentialRead(); }
+    ~SequentialReadScope() { txt.endSequentialRead(); }
+    SequentialReadScope(const SequentialReadScope&) = delete;
+    SequentialReadScope& operator=(const SequentialReadScope&) = delete;
+  };
 };
