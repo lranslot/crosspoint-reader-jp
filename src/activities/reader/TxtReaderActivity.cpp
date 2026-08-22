@@ -9,6 +9,9 @@
 #include <Serialization.h>
 #include <Utf8.h>
 
+#include <algorithm>
+#include <cstring>
+
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
@@ -28,6 +31,12 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // stale pageOffsets are silently accepted.
 // v5: F-7 replaced the wrapping algorithm, which can move a break by one character.
 constexpr uint8_t CACHE_VERSION = 5;
+
+// progress.bin. Not part of the index cache and not validated against it, so
+// CACHE_VERSION does not cover this — hence its own magic and version.
+constexpr uint32_t PROGRESS_MAGIC = 0x50585450;  // "PTXP"
+constexpr uint8_t PROGRESS_VERSION = 1;
+constexpr size_t PROGRESS_HEADER_SIZE = 8;  // magic + version + count + 2 reserved
 }  // namespace
 
 void TxtReaderActivity::onEnter() {
@@ -66,6 +75,7 @@ void TxtReaderActivity::onExit() {
 
   pageOffsets.clear();
   currentPageLines.clear();
+  offsetHistory.clear();
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   txt.reset();
@@ -152,12 +162,12 @@ void TxtReaderActivity::loop() {
   }
 
   if (prevTriggered && currentPage > 0) {
-    currentPage--;
+    goToOffset(pageOffsets[currentPage - 1], false);
     enteredFromForward = true;
     requestUpdate();
   } else if (nextTriggered) {
     if (currentPage < totalPages - 1) {
-      currentPage++;
+      goToOffset(pageOffsets[currentPage + 1], true);
       requestUpdate();
     } else {
       onGoHome();
@@ -476,24 +486,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
 // length either way, so the file size never changes and neither the page index
 // nor its cache (validated on file size, viewport, lines, font) is invalidated.
 bool TxtReaderActivity::writeCheckbox(const CheckboxRef& cb) const {
-  HalFile f = Storage.open(txt->getPath().c_str(), O_RDWR);
-  if (!f) {
-    LOG_ERR("TRS", "checkbox: open failed");
-    return false;
-  }
-  if (!f.seek(cb.markOffset)) {
-    LOG_ERR("TRS", "checkbox: seek failed");
-    f.close();
-    return false;
-  }
-  const char c = cb.checked ? ' ' : 'x';
-  const bool ok = (f.write(&c, 1) == 1);
-  f.flush();
-  f.close();
-  if (!ok) {
-    LOG_ERR("TRS", "checkbox: write failed at %zu", cb.markOffset);
-  }
-  return ok;
+  return txt->writeByteAt(cb.markOffset, cb.checked ? ' ' : 'x');
 }
 
 void TxtReaderActivity::render(RenderLock&&) {
@@ -517,11 +510,18 @@ void TxtReaderActivity::render(RenderLock&&) {
   if (currentPage < 0) currentPage = 0;
   if (currentPage >= totalPages) currentPage = totalPages - 1;
 
+  // currentOffset is the position of record; seed it from the page on the first
+  // render (before any progress has been loaded) and keep the two in step after.
+  if (offsetHistory.empty()) {
+    currentOffset = pageOffsets[currentPage];
+    offsetHistory.assign(1, currentOffset);
+  }
+  currentPage = pageForOffset(currentOffset);
+
   // Load current page content
-  size_t offset = pageOffsets[currentPage];
   size_t nextOffset;
   currentPageLines.clear();
-  loadPageAtOffset(offset, currentPageLines, nextOffset, isMarkdown ? &pageCheckboxes : nullptr);
+  loadPageAtOffset(currentOffset, currentPageLines, nextOffset, isMarkdown ? &pageCheckboxes : nullptr);
 
   // Only (re)seat the cursor when the page actually changed. render() also runs
   // for a plain redraw — moving the cursor calls requestUpdate(), so resetting
@@ -631,32 +631,119 @@ void TxtReaderActivity::renderStatusBar() const {
   GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title);
 }
 
+int TxtReaderActivity::pageForOffset(const size_t offset) const {
+  if (pageOffsets.empty()) {
+    return 0;
+  }
+  // pageOffsets is ascending, so the page containing `offset` is the last entry
+  // that does not exceed it.
+  const auto it = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), offset);
+  const int index = static_cast<int>(it - pageOffsets.begin()) - 1;
+  return index < 0 ? 0 : index;
+}
+
+void TxtReaderActivity::goToOffset(const size_t offset, const bool forward) {
+  currentOffset = offset;
+  currentPage = pageForOffset(offset);
+  if (forward) {
+    offsetHistory.push_back(offset);
+    if (offsetHistory.size() > PROGRESS_MAX_OFFSETS) {
+      offsetHistory.erase(offsetHistory.begin());
+    }
+  } else if (!offsetHistory.empty()) {
+    // Retrace: the page being left is dropped, and the one now shown is the new tail.
+    offsetHistory.pop_back();
+  }
+}
+
+// Layout of progress.bin, written whole on every save:
+//   uint32 magic | uint8 version | uint8 count | uint16 reserved | uint32 offset x count
+// offset[0] is the current page; each following entry is one page further back.
+// A 4-byte file is the old format (a page number) — see loadProgress().
 void TxtReaderActivity::saveProgress() const {
-  uint8_t data[4];
-  data[0] = currentPage & 0xFF;
-  data[1] = (currentPage >> 8) & 0xFF;
-  data[2] = 0;
-  data[3] = 0;
-  if (!ProgressFile::writeAtomic(txt->getCachePath(), data, sizeof(data))) {
-    LOG_ERR("TRS", "Failed to save progress: page %d", currentPage);
+  uint8_t data[PROGRESS_HEADER_SIZE + 4 * PROGRESS_MAX_OFFSETS];
+
+  const size_t count = std::min(offsetHistory.size(), PROGRESS_MAX_OFFSETS);
+  const uint32_t magic = PROGRESS_MAGIC;
+  memcpy(data, &magic, sizeof(magic));
+  data[4] = PROGRESS_VERSION;
+  data[5] = static_cast<uint8_t>(count);
+  data[6] = 0;
+  data[7] = 0;
+
+  // History runs oldest-first; the file runs newest-first.
+  for (size_t i = 0; i < count; i++) {
+    const uint32_t off = static_cast<uint32_t>(offsetHistory[offsetHistory.size() - 1 - i]);
+    memcpy(data + PROGRESS_HEADER_SIZE + i * 4, &off, sizeof(off));
+  }
+
+  const size_t len = PROGRESS_HEADER_SIZE + count * 4;
+  if (!ProgressFile::writeAtomic(txt->getCachePath(), data, len)) {
+    LOG_ERR("TRS", "Failed to save progress: offset %zu", currentOffset);
   }
 }
 
 void TxtReaderActivity::loadProgress() {
   HalFile f;
-  if (Storage.openFileForRead("TRS", txt->getCachePath() + "/progress.bin", f)) {
-    uint8_t data[4];
-    if (f.read(data, 4) == 4) {
-      currentPage = data[0] + (data[1] << 8);
-      if (currentPage >= totalPages) {
-        currentPage = totalPages - 1;
-      }
-      if (currentPage < 0) {
-        currentPage = 0;
-      }
-      LOG_DBG("TRS", "Loaded progress: page %d/%d", currentPage, totalPages);
-    }
+  if (!Storage.openFileForRead("TRS", txt->getCachePath() + "/progress.bin", f)) {
+    return;
   }
+
+  const size_t size = f.size();
+  uint8_t data[PROGRESS_HEADER_SIZE + 4 * PROGRESS_MAX_OFFSETS];
+
+  // Old format: exactly four bytes holding a page number. Read it as before and
+  // convert to an offset; the next save rewrites the file in the new format.
+  if (size == 4) {
+    if (f.read(data, 4) == 4) {
+      int page = data[0] + (data[1] << 8);
+      if (page >= totalPages) page = totalPages - 1;
+      if (page < 0) page = 0;
+      currentPage = page;
+      currentOffset = pageOffsets.empty() ? 0 : pageOffsets[page];
+      offsetHistory.assign(1, currentOffset);
+      LOG_DBG("TRS", "Loaded progress (legacy): page %d/%d -> offset %zu", currentPage, totalPages, currentOffset);
+    }
+    return;
+  }
+
+  if (size < PROGRESS_HEADER_SIZE) {
+    LOG_DBG("TRS", "Progress file too short (%zu bytes), ignoring", size);
+    return;
+  }
+
+  const size_t toRead = std::min(size, sizeof(data));
+  if (static_cast<size_t>(f.read(data, toRead)) != toRead) {
+    return;
+  }
+
+  uint32_t magic = 0;
+  memcpy(&magic, data, sizeof(magic));
+  if (magic != PROGRESS_MAGIC || data[4] != PROGRESS_VERSION) {
+    LOG_DBG("TRS", "Progress file unrecognised, ignoring");
+    return;
+  }
+
+  size_t count = data[5];
+  const size_t available = (toRead - PROGRESS_HEADER_SIZE) / 4;
+  if (count > available) count = available;
+  if (count == 0) {
+    return;
+  }
+
+  // File is newest-first; history is oldest-first.
+  offsetHistory.clear();
+  offsetHistory.reserve(count);
+  for (size_t i = count; i-- > 0;) {
+    uint32_t off = 0;
+    memcpy(&off, data + PROGRESS_HEADER_SIZE + i * 4, sizeof(off));
+    offsetHistory.push_back(off);
+  }
+
+  currentOffset = offsetHistory.back();
+  currentPage = pageForOffset(currentOffset);
+  LOG_DBG("TRS", "Loaded progress: offset %zu -> page %d/%d (%zu history)", currentOffset, currentPage, totalPages,
+          count);
 }
 
 bool TxtReaderActivity::loadPageIndexCache() {

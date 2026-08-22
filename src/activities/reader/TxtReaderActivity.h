@@ -10,9 +10,21 @@
 class TxtReaderActivity final : public Activity {
   std::unique_ptr<Txt> txt;
 
+  // Byte offset of the page currently displayed. This — not currentPage — is the
+  // authoritative reading position: an offset means something before the index
+  // exists, and it survives a font size change, which renumbers every page.
+  // currentPage is derived from it for display (status bar, page counter).
+  size_t currentOffset = 0;
   int currentPage = 0;
   int totalPages = 1;
   int pagesUntilFullRefresh = 0;
+
+  // Offsets of the pages walked through this session, oldest first, current last.
+  // Saved with the progress so a reopened book can still page backwards before the
+  // index has caught up. Capped because the whole point is to cover the seconds
+  // until the index lands, and SD writes a 512-byte sector either way.
+  static constexpr size_t PROGRESS_MAX_OFFSETS = 16;
+  std::vector<size_t> offsetHistory;
 
   // Streaming text reader - stores file offsets for each page
   std::vector<size_t> pageOffsets;  // File offset for start of each page
@@ -69,6 +81,11 @@ class TxtReaderActivity final : public Activity {
   void savePageIndexCache() const;
   void saveProgress() const;
   void loadProgress();
+  // Index of the page starting at or before `offset`. Binary search over
+  // pageOffsets, which is sorted ascending by construction.
+  [[nodiscard]] int pageForOffset(size_t offset) const;
+  // Move to `offset`, keeping the history in step: forward pushes, backward pops.
+  void goToOffset(size_t offset, bool forward);
 
  public:
   explicit TxtReaderActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Txt> txt,

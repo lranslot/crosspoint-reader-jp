@@ -68,6 +68,14 @@ class Txt {
   bool beginSequentialRead();
   void endSequentialRead();
 
+  // Overwrite a single byte in place. Closes any sequential read handle first, so
+  // a read handle and an O_RDWR handle are never open on the same file at once.
+  //
+  // Refuses on converted files: the offset would belong to the UTF-8 copy in the
+  // cache, and writing it into the Shift-JIS source would corrupt it. The reader
+  // also guards this via isMarkdown, so this is the second line of defence.
+  bool writeByteAt(size_t offset, char value);
+
   // Scope guard so every exit from the index build closes the handle.
   class SequentialReadScope {
     Txt& txt;

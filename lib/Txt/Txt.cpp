@@ -502,3 +502,30 @@ void Txt::endSequentialRead() {
     sequentialFile.close();
   }
 }
+
+bool Txt::writeByteAt(const size_t offset, const char value) {
+  if (converted) {
+    LOG_ERR("TXT", "Refusing to write into a converted file: %s", filepath.c_str());
+    return false;
+  }
+  // A read handle must not be open on the same path while it is reopened O_RDWR.
+  endSequentialRead();
+
+  HalFile f = Storage.open(readPath.c_str(), O_RDWR);
+  if (!f) {
+    LOG_ERR("TXT", "writeByteAt: open failed");
+    return false;
+  }
+  if (!f.seek(offset)) {
+    LOG_ERR("TXT", "writeByteAt: seek to %zu failed", offset);
+    f.close();
+    return false;
+  }
+  const bool ok = (f.write(&value, 1) == 1);
+  f.flush();
+  f.close();
+  if (!ok) {
+    LOG_ERR("TXT", "writeByteAt: write failed at %zu", offset);
+  }
+  return ok;
+}
