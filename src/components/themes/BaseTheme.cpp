@@ -830,24 +830,45 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
   if (sb.showBookProgressPercent || sb.showChapterPageCount) {
     // Right aligned text for progress counter
-    char progressStr[32];
-
     // Prefix the page count with "~" while a still-building spine only yields an estimated total.
     const char* estimatePrefix = pageCountEstimated ? "~" : "";
 
+    // Reserve a slot as wide as the widest percentage the field can hold, so that
+    // neighbouring items do not shift when the percentage gains or loses a digit
+    // (9% -> 10%). Padding with spaces would not work: the font is proportional,
+    // so a space is narrower than a digit.
+    const int percentSlotWidth = sb.showBookProgressPercent ? renderer.getTextWidth(SMALL_FONT_ID, "100%") : 0;
+
     if (sb.showBookProgressPercent && sb.showChapterPageCount) {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d  %.0f%%", estimatePrefix, currentPage, pageCount,
-               bookProgress);
+      char percentStr[8];
+      snprintf(percentStr, sizeof(percentStr), "%.0f%%", bookProgress);
+      char pageStr[24];
+      snprintf(pageStr, sizeof(pageStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+
+      const int percentWidth = renderer.getTextWidth(SMALL_FONT_ID, percentStr);
+      const int pageWidth = renderer.getTextWidth(SMALL_FONT_ID, pageStr);
+      const int gapWidth = renderer.getTextWidth(SMALL_FONT_ID, "  ");
+
+      // The percentage hugs the right edge. The page counter is placed relative to
+      // the reserved slot rather than to the current percentage, so it stays put.
+      renderer.drawText(SMALL_FONT_ID, rightClusterX - percentWidth, textY, percentStr);
+      renderer.drawText(SMALL_FONT_ID, rightClusterX - percentSlotWidth - gapWidth - pageWidth, textY, pageStr);
+
+      rightClusterWidth += percentSlotWidth + gapWidth + pageWidth;
     } else if (sb.showBookProgressPercent) {
-      snprintf(progressStr, sizeof(progressStr), "%.0f%%", bookProgress);
+      char percentStr[8];
+      snprintf(percentStr, sizeof(percentStr), "%.0f%%", bookProgress);
+      const int percentWidth = renderer.getTextWidth(SMALL_FONT_ID, percentStr);
+      renderer.drawText(SMALL_FONT_ID, rightClusterX - percentWidth, textY, percentStr);
+      // Reserve the full slot so a clock drawn to the left of it does not move either.
+      rightClusterWidth += percentSlotWidth;
     } else {
-      snprintf(progressStr, sizeof(progressStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      char pageStr[24];
+      snprintf(pageStr, sizeof(pageStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      const int pageWidth = renderer.getTextWidth(SMALL_FONT_ID, pageStr);
+      renderer.drawText(SMALL_FONT_ID, rightClusterX - pageWidth, textY, pageStr);
+      rightClusterWidth += pageWidth;
     }
-
-    int progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
-    renderer.drawText(SMALL_FONT_ID, rightClusterX - progressTextWidth, textY, progressStr);
-
-    rightClusterWidth += progressTextWidth;
   }
 
   // Draw Progress Bar
