@@ -235,6 +235,30 @@ void TxtReaderActivity::initializeReader() {
   // Load saved progress
   loadProgress();
 
+  // Snap the restored position to the start of the page that contains it. A saved
+  // offset was a page boundary under the layout in force when it was written; if
+  // the index has since been rebuilt (font size, margins, orientation) it now
+  // points into the middle of a page. Rendering from there and then paging forward
+  // to pageOffsets[n+1] would step backwards, repeating the lines already shown.
+  // A no-op for a normal resume, where the offset is already a boundary. The cost
+  // is re-reading up to a page, which is what STR_REINDEXING warns about.
+  if (!pageOffsets.empty()) {
+    currentPage = pageForOffset(currentOffset);
+    currentOffset = pageOffsets[currentPage];
+    // Everything behind the tail was a page start under the previous layout and
+    // now points into the middle of a page. Snapping the tail alone would leave
+    // those to be written back, reproducing the same duplicated lines as soon as
+    // paging backwards starts reading the history. Drop them.
+    if (indexCacheRejected && offsetHistory.size() > 1) {
+      offsetHistory.erase(offsetHistory.begin(), offsetHistory.end() - 1);
+    }
+    // The history tail is what saveProgress() writes back as the current position,
+    // so leave it agreeing with the snapped offset rather than the stale one.
+    if (!offsetHistory.empty()) {
+      offsetHistory.back() = currentOffset;
+    }
+  }
+
   // TEMPORARY instrumentation (F-2): confirms the checkbox glyphs are the same
   // width, i.e. that toggling cannot change how a line wraps.
   LOG_INF("TRS", "advance space=%d x=%d X=%d | pad space=%d upper=%d marker=%d md=%d",
@@ -255,7 +279,10 @@ void TxtReaderActivity::buildPageIndex() {
 
   LOG_DBG("TRS", "Building page index for %zu bytes...", fileSize);
 
-  GUI.drawPopup(renderer, tr(STR_INDEXING));
+  // A rebuild means the reader changed a setting under a book they had already
+  // indexed; say so, because it also costs them a little re-reading (see the
+  // snap-to-page-start in initializeReader()).
+  GUI.drawPopup(renderer, indexCacheRejected ? tr(STR_REINDEXING) : tr(STR_INDEXING));
 
   // One handle for the whole sweep instead of an open per page. Scoped so every
   // exit below — including the two breaks — closes it, and so it is never held
@@ -765,6 +792,9 @@ bool TxtReaderActivity::loadPageIndexCache() {
     LOG_DBG("TRS", "No page index cache found");
     return false;
   }
+  // The file exists, so anything that fails from here on is a rejection rather
+  // than a first open — the caller uses this to tell the two popups apart.
+  indexCacheRejected = true;
 
   // Read and validate header using serialization module
   uint32_t magic;
@@ -838,6 +868,7 @@ bool TxtReaderActivity::loadPageIndexCache() {
 
   totalPages = pageOffsets.size();
   LOG_DBG("TRS", "Loaded page index cache: %d pages", totalPages);
+  indexCacheRejected = false;  // accepted after all
   return true;
 }
 

@@ -32,6 +32,10 @@ class TxtReaderActivity final : public Activity {
   int linesPerPage = 0;
   int viewportWidth = 0;
   bool initialized = false;
+  // Set when an index cache existed but failed validation, i.e. a setting changed
+  // under a book that had already been indexed. Distinguishes a rebuild from a
+  // genuine first open, which need different wording on the popup.
+  bool indexCacheRejected = false;
 
   // --- Markdown checkbox toggling (.md only) ---
   // A checkbox found on the current page. Only the byte inside the brackets is
