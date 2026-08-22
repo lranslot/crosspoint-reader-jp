@@ -1,5 +1,6 @@
 #pragma once
 
+#include <AozoraStrip.h>
 #include <HalStorage.h>
 
 #include <memory>
@@ -16,6 +17,12 @@ class Txt {
   bool converted = false;
   size_t fileSize = 0;  // size of readPath, i.e. what offsets are measured against
 
+  // Aozora Bunko markup removal, decided once in prepareEncoding().
+  bool stripAozora = false;
+  bool aozoraHeaderFound = false;
+  size_t aozoraHeaderFirst = 0;
+  size_t aozoraHeaderLast = 0;
+
   // Open only for the duration of a sequential read run. Mutable because seeking
   // and reading it is an implementation detail of the logically const readContent.
   mutable HalFile sequentialFile;
@@ -27,10 +34,19 @@ class Txt {
   [[nodiscard]] std::string getConvertedPath() const { return cachePath + "/content.u8"; }
   [[nodiscard]] std::string getEncodingInfoPath() const { return cachePath + "/encoding.bin"; }
   bool convertToUtf8(size_t sourceSize, size_t& convertedSize);
+  // Same output file, but the source is already UTF-8: only the markup is removed.
+  bool stripUtf8ToCache(size_t sourceSize, size_t& convertedSize);
+  // Look for the legend block in the (UTF-8) probe and settle both the verdict and
+  // the line range to drop. Doing it here rather than during the scan keeps a file
+  // with a missing closing rule from losing its whole body.
+  void detectAozora(const char* probeUtf8, size_t len);
+  // Appends a report to /aozora-strip.txt. This device has no usable serial
+  // output, so the counts have to reach a file to be checked at all.
+  void logAozoraResult(size_t sourceSize, size_t convertedSize, const AozoraStrip::Stats& stats) const;
   // Sidecar accessors. Its presence is the invariant "this file has already been
   // classified"; absence means detection has never reached a conclusion for it.
-  bool readEncodingInfo(size_t sourceSize, uint8_t& outEncoding) const;
-  bool writeEncodingInfo(size_t sourceSize, size_t convertedSize, uint8_t encoding) const;
+  bool readEncodingInfo(size_t sourceSize, uint8_t& outEncoding, bool& outStripped) const;
+  bool writeEncodingInfo(size_t sourceSize, size_t convertedSize, uint8_t encoding, bool stripped) const;
 
  public:
   explicit Txt(std::string path, std::string cacheBasePath);
