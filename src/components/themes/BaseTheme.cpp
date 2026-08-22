@@ -830,8 +830,14 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
   if (sb.showBookProgressPercent || sb.showChapterPageCount) {
     // Right aligned text for progress counter
-    // Prefix the page count with "~" while a still-building spine only yields an estimated total.
-    const char* estimatePrefix = pageCountEstimated ? "~" : "";
+    // Marks the page count as estimated while a still-building spine only yields a
+    // provisional total. Drawn as its own call rather than concatenated into the
+    // page string: resolveTextFontId() scans a whole string and switches to the CJK
+    // fallback font if any character needs it, so a translated marker would drag
+    // the digits into that font too, leaving them mismatched against the
+    // ASCII-only percentage right beside them.
+    const char* estimateStr = pageCountEstimated ? tr(STR_ESTIMATE_PREFIX) : nullptr;
+    const int estimateWidth = estimateStr != nullptr ? renderer.getTextWidth(SMALL_FONT_ID, estimateStr) : 0;
 
     // Reserve a slot as wide as the widest percentage the field can hold, so that
     // neighbouring items do not shift when the percentage gains or loses a digit
@@ -843,7 +849,7 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       char percentStr[8];
       snprintf(percentStr, sizeof(percentStr), "%.0f%%", bookProgress);
       char pageStr[24];
-      snprintf(pageStr, sizeof(pageStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      snprintf(pageStr, sizeof(pageStr), "%d/%d", currentPage, pageCount);
 
       const int percentWidth = renderer.getTextWidth(SMALL_FONT_ID, percentStr);
       const int pageWidth = renderer.getTextWidth(SMALL_FONT_ID, pageStr);
@@ -851,10 +857,14 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
 
       // The percentage hugs the right edge. The page counter is placed relative to
       // the reserved slot rather than to the current percentage, so it stays put.
+      const int pageX = rightClusterX - percentSlotWidth - gapWidth - pageWidth;
       renderer.drawText(SMALL_FONT_ID, rightClusterX - percentWidth, textY, percentStr);
-      renderer.drawText(SMALL_FONT_ID, rightClusterX - percentSlotWidth - gapWidth - pageWidth, textY, pageStr);
+      renderer.drawText(SMALL_FONT_ID, pageX, textY, pageStr);
+      if (estimateStr != nullptr) {
+        renderer.drawText(SMALL_FONT_ID, pageX - estimateWidth, textY, estimateStr);
+      }
 
-      rightClusterWidth += percentSlotWidth + gapWidth + pageWidth;
+      rightClusterWidth += percentSlotWidth + gapWidth + pageWidth + estimateWidth;
     } else if (sb.showBookProgressPercent) {
       char percentStr[8];
       snprintf(percentStr, sizeof(percentStr), "%.0f%%", bookProgress);
@@ -864,10 +874,14 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
       rightClusterWidth += percentSlotWidth;
     } else {
       char pageStr[24];
-      snprintf(pageStr, sizeof(pageStr), "%s%d/%d", estimatePrefix, currentPage, pageCount);
+      snprintf(pageStr, sizeof(pageStr), "%d/%d", currentPage, pageCount);
       const int pageWidth = renderer.getTextWidth(SMALL_FONT_ID, pageStr);
-      renderer.drawText(SMALL_FONT_ID, rightClusterX - pageWidth, textY, pageStr);
-      rightClusterWidth += pageWidth;
+      const int pageX = rightClusterX - pageWidth;
+      renderer.drawText(SMALL_FONT_ID, pageX, textY, pageStr);
+      if (estimateStr != nullptr) {
+        renderer.drawText(SMALL_FONT_ID, pageX - estimateWidth, textY, estimateStr);
+      }
+      rightClusterWidth += pageWidth + estimateWidth;
     }
   }
 
