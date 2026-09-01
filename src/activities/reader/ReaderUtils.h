@@ -168,6 +168,14 @@ struct BackNavCallback {
 // Short press (< GO_BACK_OR_HOME_MS):
 // - default: go home
 // - with backShortToFileBrowser: go to file browser.
+// Known limitation, accepted: getHeldTime() reports the hardware's current press
+// duration and is not latched alongside the edge. When both the press and the
+// release happen inside a blind window (a background chapter build), the release
+// arrives from the latch but the held time no longer describes it, so a long press
+// is acted on as a short one — "home" becomes "back". That is still an improvement:
+// before latching, such a press produced nothing at all. Pairing a duration with a
+// latched edge would mean reworking every getHeldTime() caller, which is not worth
+// it for a case that only arises while a chapter is being laid out.
 inline bool handleBackNavigation(const MappedInputManager& mappedInput, ActivityManager& activityManager,
                                  const char* filePath, BackNavCallback goHome) {
   if (mappedInput.isPressed(MappedInputManager::Button::Back) && mappedInput.getHeldTime() >= GO_BACK_OR_HOME_MS) {

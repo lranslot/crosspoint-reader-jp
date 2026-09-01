@@ -104,6 +104,9 @@ void ActivityManager::loop() {
       } else {
         currentActivity = std::move(stackActivities.back());
         stackActivities.pop_back();
+        // A latched edge belongs to the screen it was aimed at; the one coming back
+        // must not inherit it.
+        mappedInput.clearLatches();
         LOG_DBG("ACT", "Popped from activity stack, new size = %zu", stackActivities.size());
         // Handle result if necessary
         if (currentActivity->resultHandler) {
@@ -144,6 +147,9 @@ void ActivityManager::loop() {
       }
       pendingAction = PendingAction::None;
       currentActivity = std::move(pendingActivity);
+      // Same reasoning as the pop path: whatever was latched was meant for the
+      // activity being left behind. Covers both Replace and Push.
+      mappedInput.clearLatches();
 
       lock.unlock();  // onEnter may acquire its own lock
       currentActivity->onEnter();
@@ -178,8 +184,12 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
     pendingActivity = std::move(newActivity);
     pendingAction = PendingAction::Replace;
   } else {
-    // No current activity, safe to launch immediately
+    // No current activity, safe to launch immediately.
+    // Reached at boot, but also whenever a pop empties the stack: exitActivity()
+    // has already cleared currentActivity by the time goHome() lands here, so a
+    // latch from the activity just closed would otherwise carry into the new one.
     currentActivity = std::move(newActivity);
+    mappedInput.clearLatches();
     currentActivity->onEnter();
   }
 }

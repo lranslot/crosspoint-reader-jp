@@ -34,10 +34,32 @@ class MappedInputManager {
 
   MappedInputManager(HalGPIO& gpio, const GfxRenderer& renderer) : gpio(gpio), renderer(renderer) {}
 
-  void update() const { gpio.update(); }
+  // Samples the hardware and latches any edge it reports.
+  //
+  // InputManager rebuilds pressedEvents/releasedEvents from scratch on every
+  // update() and holds nothing, so an edge that happens between two calls is
+  // simply never seen. That is fine at a few milliseconds apart, but a background
+  // chapter build blinds the loop for up to a second at a time, and a press and
+  // release completing inside that window used to vanish entirely. Latching here
+  // means the edge survives until something asks for it.
+  void update() const;
+  // True when the hardware reports the edge this frame, or when one was latched
+  // earlier and has not been consumed yet. Consuming clears the latch.
   bool wasPressed(Button button) const;
   bool wasReleased(Button button) const;
+  // Same answer as wasReleased(), but leaves the latch in place.
+  //
+  // For guards only — "did this other button also go up, so skip the action" —
+  // where the edge belongs to whatever handles it next and must still be there
+  // when it looks. Ordinary input handling must use wasReleased(): an edge that is
+  // tested but never consumed would fire again on the following frame.
+  bool wasReleasedPeek(Button button) const;
+  // Deliberately not latched: this reports whether the button is held *now*, and
+  // answering from a stale edge would be a different question.
   bool isPressed(Button button) const;
+  // Drops every latch. Called when the screen changes: a press aimed at the
+  // previous activity must not fire on the one that replaced it.
+  void clearLatches() const;
   bool hasTouch() const;
   bool wasScreenTapped(int& x, int& y) const;
   bool wasScreenTouchDown(int& x, int& y) const;
@@ -93,6 +115,14 @@ class MappedInputManager {
   Button mapScreenDirection(Button button) const;
   Labels mapFrontLabels(const char* back, const char* confirm, const char* left, const char* right) const;
   bool mapButton(Button button, bool (HalGPIO::*fn)(uint8_t) const) const;
+  // The physical pin a logical button resolves to, or false when it maps to none
+  // (side buttons disabled) or to more than one (the Nav* pair). Shares its rules
+  // with mapButton() so the two can never disagree.
+  bool resolvePin(Button button, uint8_t& pin) const;
+  // Shared body of wasPressed/wasReleased/wasReleasedPeek: composite buttons
+  // decompose, single buttons check the live edge then the latch. `consume`
+  // clears the latch on a hit; peeking leaves it for the next reader.
+  bool consumeEdge(Button button, bool pressed, bool consume) const;
   bool wasBackGesture() const;
   // Fetch the pending swipe (if any) and map both endpoints to logical screen coords
   bool decodeSwipe(int& sx, int& sy, int& ex, int& ey) const;
@@ -103,4 +133,17 @@ class MappedInputManager {
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
+
+  // Latches are kept per physical pin, not per logical Button: the same pin backs
+  // different logical buttons depending on the remap and side-layout settings, so
+  // keying on the logical side would double-count one press and lose another.
+  static constexpr uint8_t LATCH_PIN_COUNT = HalGPIO::BTN_POWER + 1;
+  // Long enough to bridge the worst measured blind window (957 ms while a chapter
+  // builds), short enough that a press cannot outlive the screen it was meant for.
+  static constexpr unsigned long LATCH_MAX_AGE_MS = 1500;
+
+  mutable bool pressLatched[LATCH_PIN_COUNT] = {};
+  mutable bool releaseLatched[LATCH_PIN_COUNT] = {};
+  mutable unsigned long pressLatchedAt[LATCH_PIN_COUNT] = {};
+  mutable unsigned long releaseLatchedAt[LATCH_PIN_COUNT] = {};
 };

@@ -90,9 +90,15 @@ void TxtReaderActivity::loop() {
   // --- Markdown checkbox toggle (short power press) ---
   // Mirrors the footnote binding in EpubReaderActivity: Down is excluded because
   // POWER+DOWN is the screenshot chord (caught earlier in main.cpp, guarded twice).
+  //
+  // Peeked, not consumed: this only asks whether Down also went up, to decide
+  // whether to skip the toggle. With sideButtonLayout NEXT_PREV, Down and PageBack
+  // resolve to the same pin, so consuming the edge here would swallow the page turn
+  // the same frame would otherwise perform — behaviour that held before latching
+  // was introduced and should keep holding.
   if (isMarkdown && SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CHECKBOX &&
       mappedInput.wasReleased(MappedInputManager::Button::Power) &&
-      !mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+      !mappedInput.wasReleasedPeek(MappedInputManager::Button::Down)) {
     if (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size())) {
       const unsigned long t0 = millis();
       const bool ok = writeCheckbox(pageCheckboxes[selectedCheckbox]);

@@ -106,7 +106,12 @@ class EpubReaderActivity final : public Activity {
   // being shown) and per loop() tick (background build of a large chapter). Kept small so a
   // background build chunk never noticeably delays input or a pending render.
   static constexpr int BUILD_PAGES_PER_CHUNK = 8;
-  static constexpr int BACKGROUND_BUILD_PAGES_PER_TICK = 2;
+  // One page, not two. Laying out a page measured 232 ms, so a two-page tick held
+  // the loop for ~477 ms between input samples. Latching in MappedInputManager
+  // stops presses being lost, but the delay before one is acted on is still the
+  // tick length, and halving it halves that. Total build time is unchanged: the
+  // same pages are laid out, just over twice as many turns of the loop.
+  static constexpr int BACKGROUND_BUILD_PAGES_PER_TICK = 1;
 
   // MEMFIX-PORT: background-build heap floor; portable
   // Skip background build ticks below this free-heap floor. The parse path grows

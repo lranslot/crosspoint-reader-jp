@@ -49,38 +49,49 @@ MappedInputManager::Button MappedInputManager::mapScreenDirection(const Button b
   return directions[orientation][direction];
 }
 
-bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
+// Single source of truth for logical button -> physical pin. mapButton() and the
+// latch bookkeeping both go through this, so they cannot drift apart.
+bool MappedInputManager::resolvePin(const Button button, uint8_t& pin) const {
   const auto sideLayout = SETTINGS.sideButtonLayout;
 
   switch (button) {
     case Button::Back:
       // Logical Back maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonBack);
+      pin = SETTINGS.frontButtonBack;
+      return true;
     case Button::Confirm:
       // Logical Confirm maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonConfirm);
+      pin = SETTINGS.frontButtonConfirm;
+      return true;
     case Button::Left:
       // Logical Left maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonLeft);
+      pin = SETTINGS.frontButtonLeft;
+      return true;
     case Button::Right:
       // Logical Right maps to user-configured front button.
-      return (gpio.*fn)(SETTINGS.frontButtonRight);
+      pin = SETTINGS.frontButtonRight;
+      return true;
     case Button::Up:
       // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_UP);
+      pin = HalGPIO::BTN_UP;
+      return true;
     case Button::Down:
       // Side buttons remain fixed for Up/Down.
-      return (gpio.*fn)(HalGPIO::BTN_DOWN);
+      pin = HalGPIO::BTN_DOWN;
+      return true;
     case Button::Power:
       // Power button bypasses remapping.
-      return (gpio.*fn)(HalGPIO::BTN_POWER);
+      pin = HalGPIO::BTN_POWER;
+      return true;
     case Button::PageBack:
       // Reader page navigation uses side buttons and can be swapped via settings.
       switch (sideLayout) {
         case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
+          pin = HalGPIO::BTN_UP;
+          return true;
         case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
+          pin = HalGPIO::BTN_DOWN;
+          return true;
         case CrossPointSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
@@ -89,13 +100,37 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
       // Reader page navigation uses side buttons and can be swapped via settings.
       switch (sideLayout) {
         case CrossPointSettings::PREV_NEXT:
-          return (gpio.*fn)(HalGPIO::BTN_DOWN);
+          pin = HalGPIO::BTN_DOWN;
+          return true;
         case CrossPointSettings::NEXT_PREV:
-          return (gpio.*fn)(HalGPIO::BTN_UP);
+          pin = HalGPIO::BTN_UP;
+          return true;
         case CrossPointSettings::SIDE_BUTTONS_DISABLED:
         default:
           return false;
       }
+    // Listed explicitly rather than caught by a default: these are the buttons
+    // that genuinely have no single pin — Nav* combines two, Screen* resolves to
+    // another logical button — and the caller decomposes them. A default here
+    // would let a newly added Button compile straight through and silently behave
+    // as "no pin"; spelled out, -Wswitch stops it at the point it is introduced.
+    case Button::NavNext:
+    case Button::NavPrevious:
+    case Button::ScreenLeft:
+    case Button::ScreenRight:
+    case Button::ScreenUp:
+    case Button::ScreenDown:
+      return false;
+  }
+  return false;  // unreachable; every enumerator is handled above
+}
+
+bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
+  if (uint8_t pin = 0; resolvePin(button, pin)) {
+    return (gpio.*fn)(pin);
+  }
+
+  switch (button) {
     case Button::NavNext:
       // Logical "next item" navigation: side Down + front Right, with the control axis flipped in
       // INVERTED / LANDSCAPE_CCW (frontButtonFollowOrientation) so it matches the rotated hint labels.
@@ -110,9 +145,21 @@ bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint
     case Button::ScreenUp:
     case Button::ScreenDown:
       return mapButton(mapScreenDirection(button), fn);
+    // The single-pin buttons were already answered by resolvePin(); reaching here
+    // means they resolved to no pin at all (side buttons disabled). Listed rather
+    // than defaulted so a new Button cannot slip through unnoticed.
+    case Button::Back:
+    case Button::Confirm:
+    case Button::Left:
+    case Button::Right:
+    case Button::Up:
+    case Button::Down:
+    case Button::Power:
+    case Button::PageBack:
+    case Button::PageForward:
+      return false;
   }
-
-  return false;
+  return false;  // unreachable; every enumerator is handled above
 }
 
 namespace {
@@ -309,14 +356,103 @@ bool MappedInputManager::wasHomeGesture() const {
   return false;
 }
 
+void MappedInputManager::update() const {
+  gpio.update();
+
+  // Record every edge the hardware just reported, and retire anything too old to
+  // still belong to what is on screen. Touch is deliberately left out: a tap
+  // carries coordinates, and replaying one later would aim it at whatever now
+  // happens to be under them.
+  const unsigned long now = millis();
+  for (uint8_t pin = 0; pin < LATCH_PIN_COUNT; pin++) {
+    if (pressLatched[pin] && now - pressLatchedAt[pin] > LATCH_MAX_AGE_MS) {
+      pressLatched[pin] = false;
+    }
+    if (releaseLatched[pin] && now - releaseLatchedAt[pin] > LATCH_MAX_AGE_MS) {
+      releaseLatched[pin] = false;
+    }
+    if (gpio.wasPressed(pin)) {
+      pressLatched[pin] = true;
+      pressLatchedAt[pin] = now;
+    }
+    if (gpio.wasReleased(pin)) {
+      releaseLatched[pin] = true;
+      releaseLatchedAt[pin] = now;
+    }
+  }
+}
+
+void MappedInputManager::clearLatches() const {
+  for (uint8_t pin = 0; pin < LATCH_PIN_COUNT; pin++) {
+    pressLatched[pin] = false;
+    releaseLatched[pin] = false;
+  }
+}
+
+bool MappedInputManager::consumeEdge(const Button button, const bool pressed, const bool consume) const {
+  // Composite buttons have no pin of their own. Decomposing here rather than in
+  // resolvePin() keeps the short-circuit order identical to mapButton(): the first
+  // constituent that reports an edge answers, and only its latch is consumed.
+  switch (button) {
+    case Button::NavNext:
+      return isNavDirectionSwapped()
+                 ? (consumeEdge(Button::Up, pressed, consume) || consumeEdge(Button::Left, pressed, consume))
+                 : (consumeEdge(Button::Down, pressed, consume) || consumeEdge(Button::Right, pressed, consume));
+    case Button::NavPrevious:
+      return isNavDirectionSwapped()
+                 ? (consumeEdge(Button::Down, pressed, consume) || consumeEdge(Button::Right, pressed, consume))
+                 : (consumeEdge(Button::Up, pressed, consume) || consumeEdge(Button::Left, pressed, consume));
+    case Button::ScreenLeft:
+    case Button::ScreenRight:
+    case Button::ScreenUp:
+    case Button::ScreenDown:
+      return consumeEdge(mapScreenDirection(button), pressed, consume);
+    // Single-pin buttons fall through to the latch check below. Enumerated for the
+    // same reason as in resolvePin(): a new Button must not compile silently.
+    case Button::Back:
+    case Button::Confirm:
+    case Button::Left:
+    case Button::Right:
+    case Button::Up:
+    case Button::Down:
+    case Button::Power:
+    case Button::PageBack:
+    case Button::PageForward:
+      break;
+  }
+
+  uint8_t pin = 0;
+  if (!resolvePin(button, pin)) {
+    return false;  // side buttons disabled
+  }
+
+  // The live edge still wins on its own frame, so nothing that worked before
+  // starts behaving differently. Clearing the latch alongside it keeps a caller
+  // that reads within the same frame from seeing the edge twice.
+  const bool live = pressed ? gpio.wasPressed(pin) : gpio.wasReleased(pin);
+  bool& latch = pressed ? pressLatched[pin] : releaseLatched[pin];
+  if (live || latch) {
+    if (consume) {
+      latch = false;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool MappedInputManager::wasPressed(const Button button) const {
   if (button == Button::Back && wasBackGesture()) return true;
-  return mapButton(button, &HalGPIO::wasPressed);
+  return consumeEdge(button, /*pressed=*/true, /*consume=*/true);
 }
 
 bool MappedInputManager::wasReleased(const Button button) const {
   if (button == Button::Back && wasBackGesture()) return true;
-  return mapButton(button, &HalGPIO::wasReleased);
+  return consumeEdge(button, /*pressed=*/false, /*consume=*/true);
+}
+
+bool MappedInputManager::wasReleasedPeek(const Button button) const {
+  if (button == Button::Back && wasBackGesture()) return true;
+  return consumeEdge(button, /*pressed=*/false, /*consume=*/false);
 }
 
 bool MappedInputManager::isPressed(const Button button) const { return mapButton(button, &HalGPIO::isPressed); }
