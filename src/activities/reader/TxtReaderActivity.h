@@ -26,8 +26,23 @@ class TxtReaderActivity final : public Activity {
   static constexpr size_t PROGRESS_MAX_OFFSETS = 16;
   std::vector<size_t> offsetHistory;
 
-  // Streaming text reader - stores file offsets for each page
+  // Streaming text reader - stores file offsets for each page.
+  // Built lazily: starts as {0} and grows a page per loop() pass until it reaches
+  // the end of the file. Only complete once indexComplete is set.
   std::vector<size_t> pageOffsets;  // File offset for start of each page
+  bool indexComplete = false;       // index has reached the end of the file
+  size_t indexBuildOffset = 0;      // how far into the file the index has been built
+  // Where the page currently on screen ends. Paging forward uses this rather than
+  // the index, so the reader can walk past what has been indexed so far.
+  //
+  // Invariant: every path that draws a page sets this before drawing. render() is
+  // the only such path and assigns it from loadPageAtOffset(). It runs on the
+  // render task, asynchronously from loop(), so a page turn can in principle be
+  // handled before the first render completes — hence the fallback in loop().
+  size_t currentPageNextOffset = 0;
+  // The "still indexing" popup costs a full-screen refresh (~1.7 s), so it is
+  // shown once per open and the status bar's estimate carries the message after.
+  bool loadingPopupShown = false;
   std::vector<std::string> currentPageLines;
   int linesPerPage = 0;
   int viewportWidth = 0;
@@ -81,6 +96,26 @@ class TxtReaderActivity final : public Activity {
   bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
                         std::vector<CheckboxRef>* outCheckboxes = nullptr);
   void buildPageIndex();
+  // Extend the index by at most maxPages. Returns true once it has reached the end.
+  // Never loops back to the caller's caller: one call lays out a bounded number of
+  // pages and returns, so loop() keeps sampling the buttons (see f9 design 7.3).
+  bool advanceIndex(int maxPages);
+  // Pages laid out synchronously when a book opens without a usable index. Bounded
+  // by a page count, never by the saved position: tying it to how far the reader
+  // had got is exactly what stalled the EPUB reader for 48 s with input unreachable.
+  static constexpr int INDEX_WARMUP_PAGES = 16;
+  // Sanity floor on the measured average page size before it is trusted to size
+  // the index. A page is tens of lines of text, so an average this small means
+  // the warm-up measured something unrepresentative (a run of blank lines, a
+  // file of one-word lines) and extrapolating from it would reserve wildly too
+  // much. Below this the vector is left to grow on its own.
+  static constexpr size_t MIN_AVG_BYTES_PER_PAGE = 64;
+  // Ceiling on that reservation, in pages. At 4 bytes an entry this is 16 KB,
+  // already generous against a ~200 KB DRAM budget; a book past it pays a few
+  // reallocations, which is far cheaper than reserving hundreds of KB on the
+  // strength of an estimate.
+  static constexpr size_t INDEX_RESERVE_MAX_PAGES = 4096;
+
   bool loadPageIndexCache();
   void savePageIndexCache() const;
   void saveProgress() const;
@@ -102,6 +137,21 @@ class TxtReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
+  // Suppress the loop's tail delay and power saving while the index is still being
+  // built incrementally, and only then.
+  //
+  // Without this, three idle seconds drop the CPU from 160 MHz to 10 MHz (X4 has no
+  // PSRAM, so LOW_POWER_FREQ is 10) and add a 50 ms delay per pass. Laying out a
+  // page goes from ~80 ms to ~1.3 s, and a 217-page book from ~18 s to five or ten
+  // minutes.
+  //
+  // It also breaks input. gpio.update() runs once per pass, and edges are the
+  // difference between consecutive samples, so a press and release completing
+  // inside one slow pass is never sampled at all. Latching carries an edge across a
+  // long pass; it cannot invent one that was never seen.
+  //
+  // Normal power saving resumes the moment the index completes.
+  bool skipLoopDelay() override { return !indexComplete; }
   bool handleForcedRefresh() override {
     {
       RenderLock lock(*this);

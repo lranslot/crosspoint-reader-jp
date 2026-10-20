@@ -163,17 +163,74 @@ void TxtReaderActivity::loop() {
   auto [prevTriggered, nextTriggered, fromTilt] = ReaderUtils::detectPageTurn(mappedInput);
   prevTriggered = prevTriggered || touch.prev;
   nextTriggered = nextTriggered || touch.next;
+
+  // Extend the index one page per pass, after the buttons have been read and
+  // before the early return, so it runs every pass rather than only on a turn.
+  // Placed here rather than at the top of loop() because a tick ahead of the
+  // button read makes every press wait a tick; ~80 ms per page keeps the pass
+  // short enough that a press is neither lost (it is latched) nor felt.
+  //
+  // Held under the RenderLock: this runs on the main task while render() runs on
+  // the render task, and it both grows pageOffsets (a reallocation would move the
+  // array out from under a concurrent read) and seeks the shared sequential read
+  // handle. Skipped rather than waited on when a render already holds the lock —
+  // the next pass will pick it up, and blocking here would stall input.
+  bool indexJustCompleted = false;
+  if (!indexComplete && !RenderLock::peek()) {
+    RenderLock lock;
+    // Re-check under the lock: peek() and acquisition are not atomic, and render()
+    // can finish the index itself between the two.
+    if (!indexComplete) {
+      indexJustCompleted = advanceIndex(1);
+    }
+  }
+  if (indexJustCompleted) {
+    // Safe without the lock: indexComplete is set, so pageOffsets no longer changes.
+    savePageIndexCache();
+    // Rule 2: recompute the page number, but leave the offset where the reader
+    // put it. Snapping here would move the text under them mid-read.
+    currentPage = pageForOffset(currentOffset);
+    requestUpdate();
+  }
+
   if (!prevTriggered && !nextTriggered) {
     return;
   }
 
-  if (prevTriggered && currentPage > 0) {
-    goToOffset(pageOffsets[currentPage - 1], false);
-    enteredFromForward = true;
-    requestUpdate();
+  const size_t fileSize = txt->getFileSize();
+
+  if (prevTriggered) {
+    // Rule 4: the walked route first — those offsets are exact even off-grid.
+    if (offsetHistory.size() > 1) {
+      const size_t previous = offsetHistory[offsetHistory.size() - 2];
+      goToOffset(previous, false);
+      enteredFromForward = true;
+      requestUpdate();
+    } else if (currentOffset <= pageOffsets.back() && currentPage > 0) {
+      // No history, but the index reaches back this far.
+      goToOffset(pageOffsets[currentPage - 1], false);
+      enteredFromForward = true;
+      requestUpdate();
+    } else if (currentPage > 0 && !loadingPopupShown) {
+      // Behind the indexed range with nothing walked to fall back on. Refusing is
+      // the correct answer: building synchronously to satisfy it is exactly the
+      // 48-second stall the EPUB reader hit. Said once — a full-screen refresh per
+      // press would be worse than the refusal itself, and the status bar keeps
+      // showing the count as estimated.
+      loadingPopupShown = true;
+      GUI.drawPopup(renderer, tr(STR_LOADING));
+      pagesUntilFullRefresh = 1;
+      requestUpdate();
+    }
   } else if (nextTriggered) {
-    if (currentPage < totalPages - 1) {
-      goToOffset(pageOffsets[currentPage + 1], true);
+    // Rule 3: walk forward by where the drawn page ended, so the reader is never
+    // held up by the index. Falls back to the index if render() has not run yet —
+    // it is on another task, so the very first turn can arrive first.
+    const size_t nextOffset = currentPageNextOffset > currentOffset
+                                  ? currentPageNextOffset
+                                  : (currentPage + 1 < totalPages ? pageOffsets[currentPage + 1] : fileSize);
+    if (nextOffset < fileSize) {
+      goToOffset(nextOffset, true);
       requestUpdate();
     } else {
       onGoHome();
@@ -231,11 +288,17 @@ void TxtReaderActivity::initializeReader() {
   LOG_DBG("TRS", "Viewport: %dx%d, lines per page: %d", viewportWidth, viewportHeight, linesPerPage);
 
   // Try to load cached page index first
-  if (!loadPageIndexCache()) {
-    // Cache not found, build page index
+  if (loadPageIndexCache()) {
+    indexComplete = true;
+    indexBuildOffset = txt->getFileSize();
+  } else {
+    // No usable cache: lay out only enough to open the book. loop() extends the
+    // index behind the reader, and savePageIndexCache() runs when it finishes —
+    // writing a partial index would cache a lie.
     buildPageIndex();
-    // Save to cache for next time
-    savePageIndexCache();
+    if (indexComplete) {
+      savePageIndexCache();
+    }
   }
 
   // Load saved progress
@@ -248,7 +311,20 @@ void TxtReaderActivity::initializeReader() {
   // to pageOffsets[n+1] would step backwards, repeating the lines already shown.
   // A no-op for a normal resume, where the offset is already a boundary. The cost
   // is re-reading up to a page, which is what STR_REINDEXING warns about.
-  if (!pageOffsets.empty()) {
+  // Four rules govern how the position relates to the index, together keeping the
+  // reader on the page grid without ever moving the text under them:
+  //   1. On open, snap only if the index already covers currentOffset. If it does
+  //      not (a deep resume the warm-up did not reach), leave the offset alone.
+  //   2. When the index completes, do NOT snap. The reader has been reading by
+  //      then, and snapping would jump them back up to a page — the same visible
+  //      defect fixed in d5e0ed91. Only currentPage is recomputed.
+  //   3. Paging forward always uses currentPageNextOffset, never the index, so it
+  //      works past the indexed range and cannot be dragged onto the grid.
+  //   4. Paging backward prefers offsetHistory, the route actually walked, which
+  //      is exact whether or not those offsets sit on the grid.
+  // Off-grid reading is therefore harmless, and the next open starts from a valid
+  // cache that covers the position, where rule 1 quietly puts it back on the grid.
+  if (!pageOffsets.empty() && currentOffset <= pageOffsets.back()) {
     currentPage = pageForOffset(currentOffset);
     currentOffset = pageOffsets[currentPage];
     // Everything behind the tail was a page start under the previous layout and
@@ -276,51 +352,107 @@ void TxtReaderActivity::initializeReader() {
   initialized = true;
 }
 
+// Lay out the opening pages so the book can be shown, then stop. The rest is
+// built a page at a time from loop().
 void TxtReaderActivity::buildPageIndex() {
   pageOffsets.clear();
   pageOffsets.push_back(0);  // First page starts at offset 0
+  indexBuildOffset = 0;
+  indexComplete = false;
 
-  size_t offset = 0;
-  const size_t fileSize = txt->getFileSize();
-
-  LOG_DBG("TRS", "Building page index for %zu bytes...", fileSize);
+  LOG_DBG("TRS", "Starting page index for %zu bytes...", txt->getFileSize());
 
   // A rebuild means the reader changed a setting under a book they had already
   // indexed; say so, because it also costs them a little re-reading (see the
-  // snap-to-page-start in initializeReader()).
+  // snap-to-page-start in initializeReader()). Only the warm-up is announced —
+  // everything after it happens quietly behind the reader.
   GUI.drawPopup(renderer, indexCacheRejected ? tr(STR_REINDEXING) : tr(STR_INDEXING));
 
-  // One handle for the whole sweep instead of an open per page. Scoped so every
-  // exit below — including the two breaks — closes it, and so it is never held
-  // while the reader could be writing back a checkbox.
-  const Txt::SequentialReadScope sequentialRead(*txt);
+  advanceIndex(INDEX_WARMUP_PAGES);
 
-  while (offset < fileSize) {
+  // Size the index once, here, from the page size the warm-up just measured.
+  // It cannot be done any earlier: an average needs real page boundaries, and
+  // nothing but laying pages out produces them -- before the warm-up there is
+  // only a file size, which says nothing about how many pages it wraps to at the
+  // current font and margins. Doing it now means the rest of the index lands in
+  // one block rather than forcing a geometric regrowth (211 pages = 8
+  // reallocations) a page at a time while the reader is reading. Same
+  // extrapolation the status bar uses for its estimated page count.
+  //
+  // Skipped when the warm-up already finished the index: a file that small has
+  // its final size, and reserving past it would only waste the slack.
+  if (!indexComplete && !pageOffsets.empty() && indexBuildOffset > 0) {
+    const size_t avgBytesPerPage = indexBuildOffset / pageOffsets.size();
+    if (avgBytesPerPage >= MIN_AVG_BYTES_PER_PAGE) {
+      size_t estimate = txt->getFileSize() / avgBytesPerPage;
+      // An eighth of headroom against the warm-up landing on denser-than-average
+      // text. Sixteen pages is a small sample: if they happen to be unusually
+      // full, the measured page size comes out too large and the page count too
+      // small, which costs exactly the one reallocation this is here to avoid.
+      // The opposite case needs no protection -- short opening pages measure a
+      // small average and so overestimate the count, which merely over-reserves.
+      estimate += estimate / 8 + 1;
+      // std::clamp is undefined when lo > hi. It holds here only because this runs
+      // immediately after the warm-up, where pageOffsets.size() is around 17 and
+      // so far below INDEX_RESERVE_MAX_PAGES that the two cannot cross. Moving
+      // this call later, to a point where the index may already hold more than
+      // INDEX_RESERVE_MAX_PAGES pages, would break that and has to be guarded.
+      estimate = std::clamp(estimate, pageOffsets.size(), INDEX_RESERVE_MAX_PAGES);
+      if (estimate > pageOffsets.capacity()) {
+        pageOffsets.reserve(estimate);
+      }
+    }
+  }
+
+  LOG_DBG("TRS", "Warm-up index: %d pages%s, reserved %zu", totalPages, indexComplete ? " (complete)" : "",
+          pageOffsets.capacity());
+}
+
+bool TxtReaderActivity::advanceIndex(const int maxPages) {
+  if (indexComplete) {
+    return true;
+  }
+  const size_t fileSize = txt->getFileSize();
+
+  // Reuse one handle across the pages laid out here. beginSequentialRead() is a
+  // no-op when already open, so the handle survives from tick to tick; the
+  // checkbox write-back closes it and the next tick simply reopens. Reopening per
+  // page instead cost ~130 ms, well over the ~80 ms a page takes to lay out.
+  txt->beginSequentialRead();
+
+  for (int i = 0; i < maxPages && indexBuildOffset < fileSize; i++) {
     std::vector<std::string> tempLines;
-    size_t nextOffset = offset;
+    size_t nextOffset = indexBuildOffset;
 
-    if (!loadPageAtOffset(offset, tempLines, nextOffset)) {
+    if (!loadPageAtOffset(indexBuildOffset, tempLines, nextOffset) || nextOffset <= indexBuildOffset) {
+      // Cannot read or cannot make progress: treat the index as finished here
+      // rather than retrying forever.
+      LOG_ERR("TRS", "Index build stopped at %zu of %zu", indexBuildOffset, fileSize);
+      indexComplete = true;
       break;
     }
 
-    if (nextOffset <= offset) {
-      // No progress made, avoid infinite loop
-      break;
+    indexBuildOffset = nextOffset;
+    if (indexBuildOffset < fileSize) {
+      pageOffsets.push_back(indexBuildOffset);
     }
 
-    offset = nextOffset;
-    if (offset < fileSize) {
-      pageOffsets.push_back(offset);
-    }
-
-    // Yield to other tasks periodically
-    if (pageOffsets.size() % 20 == 0) {
+    // Yield during the synchronous warm-up. The per-tick path returns to loop()
+    // after a single page and needs no yield of its own.
+    if (maxPages > 1 && pageOffsets.size() % 20 == 0) {
       vTaskDelay(1);
     }
   }
 
-  totalPages = pageOffsets.size();
-  LOG_DBG("TRS", "Built page index: %d pages", totalPages);
+  if (indexBuildOffset >= fileSize) {
+    indexComplete = true;
+  }
+  totalPages = static_cast<int>(pageOffsets.size());
+
+  if (indexComplete) {
+    txt->endSequentialRead();
+  }
+  return indexComplete;
 }
 
 namespace {
@@ -552,9 +684,12 @@ void TxtReaderActivity::render(RenderLock&&) {
   currentPage = pageForOffset(currentOffset);
 
   // Load current page content
-  size_t nextOffset;
+  size_t nextOffset = currentOffset;
   currentPageLines.clear();
   loadPageAtOffset(currentOffset, currentPageLines, nextOffset, isMarkdown ? &pageCheckboxes : nullptr);
+  // Upholds the invariant on currentPageNextOffset: this is the only path that
+  // draws a page, and paging forward reads this instead of the index.
+  currentPageNextOffset = nextOffset;
 
   // Only (re)seat the cursor when the page actually changed. render() also runs
   // for a plain redraw — moving the cursor calls requestUpdate(), so resetting
@@ -656,12 +791,38 @@ void TxtReaderActivity::renderPage() {
 }
 
 void TxtReaderActivity::renderStatusBar() const {
-  const float progress = totalPages > 0 ? (currentPage + 1) * 100.0f / totalPages : 0;
+  const size_t fileSize = txt->getFileSize();
+
+  // Progress comes from the byte offset, not the page number: it is exact from the
+  // moment the book opens, with or without a finished index.
+  const float progress = fileSize > 0 ? static_cast<float>(currentOffset) * 100.0f / static_cast<float>(fileSize) : 0;
+
+  // While the index is still growing, totalPages is only what has been laid out so
+  // far. Extrapolate from the average page size measured over the indexed part —
+  // the status bar marks the number as estimated, so it reads as provisional
+  // rather than as a total that keeps changing.
+  int displayPage = currentPage + 1;
+  int displayTotal = totalPages;
+  if (!indexComplete && !pageOffsets.empty() && indexBuildOffset > 0) {
+    const size_t avgBytesPerPage = indexBuildOffset / pageOffsets.size();
+    if (avgBytesPerPage > 0) {
+      displayTotal = static_cast<int>(fileSize / avgBytesPerPage);
+      // Past the indexed range the page number has to be estimated too; within it
+      // the binary search already gave the exact one.
+      if (currentOffset > pageOffsets.back()) {
+        displayPage = static_cast<int>(currentOffset / avgBytesPerPage) + 1;
+      }
+      if (displayTotal < displayPage) {
+        displayTotal = displayPage;  // never show 5/3
+      }
+    }
+  }
+
   std::string title;
   if (SETTINGS.statusBarSpec().showsTitle()) {
     title = txt->getTitle();
   }
-  GUI.drawStatusBar(renderer, progress, currentPage + 1, totalPages, title);
+  GUI.drawStatusBar(renderer, progress, displayPage, displayTotal, title, 0, 0, true, false, !indexComplete);
 }
 
 int TxtReaderActivity::pageForOffset(const size_t offset) const {
