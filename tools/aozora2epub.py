@@ -75,6 +75,37 @@ def strip_annotations(text):
     return re.sub(r'［＃[^］]*］', '', text)
 
 
+def lone_heading_annotation(text):
+    """注記だけで構成された行なら (レベル, 指している文字列)、違えば None。
+
+    青空文庫は見出し注記を本文と同じ行にも、次の行にも書く:
+
+        ［＃５字下げ］第一章［＃「第一章」は大見出し］     ← インライン形式
+        第一章
+        ［＃「第一章」は大見出し］                        ← 別行形式
+
+    後者を拾うために、注記しか無い行を見分ける。注記を落として本文が残る行は
+    インライン形式なので、ここでは対象外として None を返す。
+    """
+    heading = extract_headings(text)
+    if not heading:
+        return None
+    if strip_annotations(text).strip('　 \t'):
+        return None
+    return heading
+
+
+def text_for_match(text):
+    """見出し注記の「...」と突き合わせるために、ルビ記法を落とす。
+
+    注記は親文字だけを引用するので、`真面目《しんめんぼく》` という行は
+    `［＃「真面目」は大見出し］` と書かれる。記法を残したままでは一致しない。
+    """
+    text = re.sub(r'｜([^《]+)《[^》]*》', r'\1', text)
+    text = re.sub(r'《[^》]*》', '', text)
+    return text.strip('　 \t')
+
+
 def apply_ruby(text):
     """《》記法を <ruby> に変換する。HTML エスケープ後に適用する前提。"""
     # 1) ｜による明示指定が最優先
@@ -101,20 +132,44 @@ def apply_ruby(text):
 
 def build_xhtml(body_lines, title, author):
     parts = []
+    # \u76f4\u524d\u306b\u6bb5\u843d\u3068\u3057\u3066\u51fa\u3057\u305f\u884c\u3002\u5225\u884c\u5f62\u5f0f\u306e\u898b\u51fa\u3057\u6ce8\u8a18\u306f\u3001\u3053\u306e\u884c\u3092\u6307\u3057\u3066\u3044\u308b\u3068\u304d
+    # \u306b\u9650\u308a\u898b\u51fa\u3057\u3078\u4f5c\u308a\u66ff\u3048\u308b\u3002\u7a7a\u884c\u3084\u898b\u51fa\u3057\u3092\u631f\u3080\u3068 None \u306b\u623b\u308b\u306e\u3067\u3001\u96e2\u308c\u305f\u884c\u3092
+    # \u5dfb\u304d\u8fbc\u3080\u3053\u3068\u306f\u306a\u3044\u3002
+    #
+    # 2\u3064\u6301\u3064\u306e\u306f\u3001\u7a81\u304d\u5408\u308f\u305b\u306b\u306f\u30eb\u30d3\u8a18\u6cd5\u3092\u843d\u3068\u3057\u305f\u5f62\u304c\u8981\u308b\u4e00\u65b9\u3001\u4f5c\u308a\u66ff\u3048\u3066\u51fa\u3059
+    # \u3068\u304d\u306f\u8a18\u6cd5\u306e\u4ed8\u3044\u305f\u5143\u306e\u884c\u304c\u8981\u308b\u305f\u3081\u3002\u7247\u65b9\u3067\u6e08\u307e\u305b\u308b\u3068\u3001\u30eb\u30d3\u4ed8\u304d\u306e\u898b\u51fa\u3057\u304b\u3089
+    # \u30eb\u30d3\u304c\u6d88\u3048\u308b\u3002
+    previous_line = None
+    previous_match = None
     for raw in body_lines:
         line = convert_gaiji(raw)
+
+        lone = lone_heading_annotation(line)
+        if lone:
+            level, named = lone
+            # \u6307\u3057\u3066\u3044\u308b\u6587\u5b57\u5217\u304c\u76f4\u524d\u306e\u884c\u3068\u4e00\u81f4\u3057\u306a\u3044\u306a\u3089\u3001\u5225\u306e\u7b87\u6240\u3092\u6307\u3057\u3066\u3044\u308b
+            # \u53ef\u80fd\u6027\u304c\u3042\u308b\u3002\u5b89\u5168\u5074\u306b\u5012\u3057\u3066\u672c\u6587\u306e\u307e\u307e\u306b\u3059\u308b\u3002
+            if previous_match is not None and named == previous_match:
+                esc = apply_ruby(html.escape(previous_line))
+                parts[-1] = f'<h{level}>{esc}</h{level}>'
+                previous_line = previous_match = None
+            continue
+
         heading = extract_headings(line)
         line = strip_annotations(line)
         line = line.strip('\u3000 \t')
         if not line:
+            previous_line = previous_match = None
             continue
+        esc = apply_ruby(html.escape(line))
         if heading:
             level, _ = heading
-            esc = apply_ruby(html.escape(line))
             parts.append(f'<h{level}>{esc}</h{level}>')
+            previous_line = previous_match = None
         else:
-            esc = apply_ruby(html.escape(line))
             parts.append(f'<p>{esc}</p>')
+            previous_line = line
+            previous_match = text_for_match(line)
 
     return f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
