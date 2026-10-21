@@ -1,7 +1,7 @@
 # Phase E (公開) の持ち物リスト
 
 **作成日**: 2026-10-21
-**出所**: 旧 `xteink-x4-jp-firmware-spec-v0_7.md` §10.3
+**出所**: 旧 `xteink-x4-jp-firmware-spec-v0_7.md` §10.3 (削除済み。`git log --all` で辿れる)
 **位置づけ**: 導入手順書に**必ず**書くべき事項の一覧
 
 ---
