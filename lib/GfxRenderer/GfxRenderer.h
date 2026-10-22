@@ -297,8 +297,15 @@ class GfxRenderer {
   std::string truncatedText(int fontId, const char* text, int maxWidth,
                             EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   /// Word-wrap \p text into at most \p maxLines lines, each no wider than
-  /// \p maxWidth pixels. Overflowing words and excess lines are UTF-8-safely
-  /// truncated with an ellipsis (U+2026).
+  /// \p maxWidth pixels.
+  ///
+  /// Breaks at ASCII spaces where there are any. A word too wide for a line on
+  /// its own is broken at a codepoint boundary instead of being dropped, via
+  /// findWrapOffset() — without that, a label in a language that does not write
+  /// spaces (any CJK text) is one single word and disappears entirely.
+  ///
+  /// Only the last line is ellipsised (U+2026), when the text still has more to
+  /// give once \p maxLines is reached.
   std::vector<std::string> wrappedText(int fontId, const char* text, int maxWidth, int maxLines,
                                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
 

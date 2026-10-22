@@ -1644,25 +1644,36 @@ std::vector<std::string> GfxRenderer::wrappedText(const int fontId, const char* 
 
     if (getTextWidth(fontId, testLine.c_str(), style) <= maxWidth) {
       currentLine = testLine;
+    } else if (!currentLine.empty()) {
+      lines.push_back(currentLine);
+      currentLine.clear();
+      // Put the word back rather than deciding its fate here: the loop top then
+      // applies the last-line ellipsis, or the split below, with the line budget
+      // that is actually left. Re-joining with a single space is what the split
+      // above already did, so the text is unchanged.
+      remaining = remaining.empty() ? word : word + " " + remaining;
     } else {
-      if (!currentLine.empty()) {
-        lines.push_back(currentLine);
-        // If the carried-over word itself exceeds maxWidth, truncate it and
-        // push it as a complete line immediately — storing it in currentLine
-        // would allow a subsequent short word to be appended after the ellipsis.
-        if (getTextWidth(fontId, word.c_str(), style) > maxWidth) {
-          lines.push_back(truncatedText(fontId, word.c_str(), maxWidth, style));
-          currentLine.clear();
-          if (static_cast<int>(lines.size()) >= maxLines) return lines;
-        } else {
-          currentLine = word;
-        }
-      } else {
-        // Single word wider than maxWidth: truncate and stop to avoid complicated
-        // splitting rules (different between languages). Results in an aesthetically
-        // pleasing end.
-        lines.push_back(truncatedText(fontId, word.c_str(), maxWidth, style));
-        return lines;
+      // One word wider than the whole line, with no space to break at: a
+      // no-space filename, or any CJK run, since Japanese has no spaces at all.
+      // Truncating here used to drop the rest of the label, which for a
+      // Japanese button hint meant dropping all of it.
+      //
+      // findWrapOffset() walks forward once, accumulating in fixed point, and
+      // returns the last codepoint boundary that fits — the same primitive the
+      // TXT reader wraps body text with, so the break lands where measuring
+      // would put it. preferSpace is off because `word` has no space by
+      // construction, and extraWidth is 0: nothing is reserved beside a label.
+      size_t fit = findWrapOffset(fontId, word.c_str(), maxWidth, style, /*preferSpace=*/false);
+      if (fit == 0) {
+        // Not even one codepoint fits. Take one anyway, or the loop never ends;
+        // the glyph overflows its box, which is still better than losing the text.
+        fit = 1;
+        while (fit < word.size() && (static_cast<unsigned char>(word[fit]) & 0xC0) == 0x80) fit++;
+      }
+      lines.push_back(word.substr(0, fit));
+      const std::string rest = word.substr(fit);
+      if (!rest.empty()) {
+        remaining = remaining.empty() ? rest : rest + " " + remaining;
       }
     }
   }

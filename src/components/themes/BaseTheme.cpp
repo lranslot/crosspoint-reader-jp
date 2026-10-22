@@ -152,7 +152,9 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
 // Centre a button-hint label inside its box. A label that fits is drawn on the
 // single baseline it always was; one too wide used to overflow the button border
 // and run into the neighbouring hint, and now wraps to at most two centred lines
-// (wrappedText() ellipsises anything that still doesn't fit). Shared so every
+// (wrappedText() breaks a spaceless label at a codepoint boundary, so a CJK
+// hint wraps rather than vanishing, and ellipsises only what two lines cannot
+// hold). Shared so every
 // theme's drawButtonHints() gets the same behaviour.
 void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const char* label, const int x,
                               const int boxWidth, const int boxTop, const int boxHeight, const int singleLineYOffset) {
