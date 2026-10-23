@@ -149,35 +149,87 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
   renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText.c_str());
 }
 
+namespace {
+// Spaced by the glyph height, not getLineHeight() — that returns the font's full
+// advanceY (leading included), which stacks two lines taller than the button and
+// clips the second one.
+constexpr int kHintLineGap = 2;
+
+// Whether two lines of `label` fit the box when drawn with `fontId`.
+//
+// Measured against the ascender of the font the text will actually be drawn
+// with: for a CJK label that is the SD fallback, not fontId, and the two
+// metrics are not the same. Descenders are left out deliberately — the value in
+// the font is the maximum over every glyph, driven by Latin g/p/y, and a label
+// made of kana and kanji puts no ink below the baseline. A two-line label that
+// does contain Latin descenders can overhang by a few pixels; that is the
+// trade, and it is the model that matches the device (UI_10 overflows, SMALL
+// does not).
+bool twoLinesFit(const GfxRenderer& renderer, const int fontId, const char* label, const int boxHeight) {
+  const int ascender = renderer.getTextAscender(fontId, label);
+  return 2 * ascender + kHintLineGap <= boxHeight;
+}
+}  // namespace
+
 // Centre a button-hint label inside its box. A label that fits is drawn on the
 // single baseline it always was; one too wide used to overflow the button border
-// and run into the neighbouring hint, and now wraps to at most two centred lines
-// (wrappedText() breaks a spaceless label at a codepoint boundary, so a CJK
-// hint wraps rather than vanishing, and ellipsises only what two lines cannot
-// hold). Shared so every
-// theme's drawButtonHints() gets the same behaviour.
+// and run into the neighbouring hint, and now wraps to at most two centred
+// lines (wrappedText() breaks a spaceless label at a codepoint boundary, so a
+// CJK hint wraps rather than vanishing). Shared so every theme's
+// drawButtonHints() gets the same behaviour.
+//
+// Two lines do not always fit. The box is 40 px and UI_10's ascender is 20, so
+// 2 * 20 already equals the box with nothing left for the gap or the top
+// margin — no arrangement of line spacing gets two lines of UI_10 into it. Such
+// a label drops to SMALL (ascender 18), which fits at 38 px and is also narrow
+// enough that many labels then need only one line. If even that will not fit,
+// the label is truncated rather than drawn past the box: the box's lower edge is
+// the bottom edge of the screen, so an overflow is not clipped by a border, it
+// leaves the panel.
 void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const char* label, const int x,
                               const int boxWidth, const int boxTop, const int boxHeight, const int singleLineYOffset) {
   constexpr int textPadding = 4;  // keeps a wrapped label off the button's border
   const int maxTextWidth = boxWidth - (textPadding * 2);
 
+  const auto drawSingleLine = [&](const int useFontId, const char* text) {
+    const std::string fitted = renderer.truncatedText(useFontId, text, maxTextWidth);
+    const int fittedWidth = renderer.getTextWidth(useFontId, fitted.c_str());
+    renderer.drawText(useFontId, x + (boxWidth - 1 - fittedWidth) / 2, boxTop + singleLineYOffset, fitted.c_str());
+  };
+
   const int textWidth = renderer.getTextWidth(fontId, label);
   if (textWidth <= maxTextWidth) {
+    // Unchanged: one line, one baseline, no truncation possible since it fits.
     renderer.drawText(fontId, x + (boxWidth - 1 - textWidth) / 2, boxTop + singleLineYOffset, label);
     return;
   }
 
-  // Spaced by the glyph height, not getLineHeight() — that returns the font's
-  // full advanceY (leading included), which stacks two lines taller than the
-  // button and clips the second one.
-  constexpr int lineGap = 2;
-  const int step = renderer.getTextHeight(fontId) + lineGap;
-  const auto lines = renderer.wrappedText(fontId, label, maxTextWidth, 2);
-  const int block = static_cast<int>(lines.size()) * step - lineGap;
+  int wrapFontId = fontId;
+  if (!twoLinesFit(renderer, wrapFontId, label, boxHeight) && fontId == UI_10_FONT_ID) {
+    // One step down is the only step there is: SMALL is the smallest UI face,
+    // and no theme passes UI_12 here. Lyra already passes SMALL, so it never
+    // reaches this line and its hints are untouched.
+    wrapFontId = SMALL_FONT_ID;
+    if (renderer.getTextWidth(wrapFontId, label) <= maxTextWidth) {
+      drawSingleLine(wrapFontId, label);
+      return;
+    }
+  }
+
+  if (!twoLinesFit(renderer, wrapFontId, label, boxHeight)) {
+    // Last resort. Losing the tail of a label is bad; drawing it off the bottom
+    // of the screen is worse, because nothing on screen says it happened.
+    drawSingleLine(wrapFontId, label);
+    return;
+  }
+
+  const int step = renderer.getTextAscender(wrapFontId, label) + kHintLineGap;
+  const auto lines = renderer.wrappedText(wrapFontId, label, maxTextWidth, 2);
+  const int block = static_cast<int>(lines.size()) * step - kHintLineGap;
   int lineY = boxTop + std::max(1, (boxHeight - block) / 2);
   for (const auto& line : lines) {
-    const int lineWidth = renderer.getTextWidth(fontId, line.c_str());
-    renderer.drawText(fontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());
+    const int lineWidth = renderer.getTextWidth(wrapFontId, line.c_str());
+    renderer.drawText(wrapFontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());
     lineY += step;
   }
 }

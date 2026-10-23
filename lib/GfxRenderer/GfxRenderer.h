@@ -292,6 +292,15 @@ class GfxRenderer {
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR, bool preferSpace = true,
                         int extraWidth = 0) const;
   int getFontAscenderSize(int fontId) const;
+  /// Ascender of the font \p text will actually be drawn with, which for a
+  /// CJK-bearing string is the fallback font and not \p fontId (see drawText,
+  /// which places the baseline at y + that font's ascender).
+  ///
+  /// Callers stacking lines by hand need this rather than getTextHeight():
+  /// measuring with the primary font and drawing with the fallback puts the
+  /// second line wherever the two metrics happen to differ. One id is resolved
+  /// for the whole string, so one ascender covers it.
+  int getTextAscender(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getLineHeight(int fontId) const;
   int getLineHeight(int fontId, float compression) const;
   std::string truncatedText(int fontId, const char* text, int maxWidth,

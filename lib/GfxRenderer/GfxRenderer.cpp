@@ -2102,6 +2102,10 @@ int GfxRenderer::getLineHeight(const int fontId, const float compression) const 
   return static_cast<int>(getLineHeight(fontId) * compression + 0.5f);
 }
 
+int GfxRenderer::getTextAscender(const int fontId, const char* text, const EpdFontFamily::Style style) const {
+  return getFontAscenderSize(resolveTextFontId(fontId, text, style));
+}
+
 int GfxRenderer::getTextHeight(const int fontId) const {
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) {
