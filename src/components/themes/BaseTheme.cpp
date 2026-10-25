@@ -226,7 +226,10 @@ void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const cha
   const int step = renderer.getTextAscender(wrapFontId, label) + kHintLineGap;
   const auto lines = renderer.wrappedText(wrapFontId, label, maxTextWidth, 2);
   const int block = static_cast<int>(lines.size()) * step - kHintLineGap;
-  int lineY = boxTop + std::max(1, (boxHeight - block) / 2);
+  // Zero top padding is allowed: a face whose two lines exactly fill the box has
+  // no pixel to spare, and insisting on one would push the second baseline past
+  // the bottom of the screen. Every face with room over agrees with max(1, ...).
+  int lineY = boxTop + std::max(0, (boxHeight - block) / 2);
   for (const auto& line : lines) {
     const int lineWidth = renderer.getTextWidth(wrapFontId, line.c_str());
     renderer.drawText(wrapFontId, x + (boxWidth - 1 - lineWidth) / 2, lineY, line.c_str());
