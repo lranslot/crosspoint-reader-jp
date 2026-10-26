@@ -62,16 +62,16 @@ class TxtReaderActivity final : public Activity {
   };
 
   bool isMarkdown = false;
-  int markerWidth = 0;  // gutter reserved for the "> " cursor marker
+  int markerWidth = 0;  // gutter reserved for the checkbox, measured from "> "
   std::vector<CheckboxRef> pageCheckboxes;
   int selectedCheckbox = -1;
   int checkboxPageStamp = -1;  // which page selectedCheckbox belongs to
-  // Width corrections that make all three mark states (' ' / 'x' / 'X') measure as
-  // wide as 'x', so toggling can never change how a line wraps. 'x' itself is 0;
-  // the upper-case pad is normally negative because 'X' is wider than 'x'.
-  int checkboxMarkPadSpace = 0;
-  int checkboxMarkPadUpper = 0;
-  int markPadFor(char mark) const;
+  // Box drawn in the gutter instead of showing the "- [ ] " notation. Its side is
+  // whatever the gutter and the line height allow, with no nominal cap, so it
+  // scales with the reading font. Below the minimum the gutter is left blank
+  // rather than drawing something unreadable.
+  static constexpr int CHECKBOX_MIN_SIDE = 5;  // under this the cross has no room
+  void drawCheckbox(int gutterX, int y, int lineHeight, bool checked, bool selected) const;
   // Whether the last page move was backwards. A page entered from the front is
   // selected at its last checkbox, so walking backwards is not thrown to the top.
   bool enteredFromForward = false;

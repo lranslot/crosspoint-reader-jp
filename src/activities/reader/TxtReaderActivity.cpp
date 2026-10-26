@@ -30,7 +30,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // algorithm, so any change to how lines are measured or broken must bump this or
 // stale pageOffsets are silently accepted.
 // v5: F-7 replaced the wrapping algorithm, which can move a break by one character.
-constexpr uint8_t CACHE_VERSION = 5;
+constexpr uint8_t CACHE_VERSION = 6;
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -258,27 +258,15 @@ void TxtReaderActivity::initializeReader() {
       std::max(cachedScreenMargin, static_cast<uint8_t>(UITheme::getInstance().getStatusBarHeight()));
 
   viewportWidth = renderer.getScreenWidth() - cachedOrientedMarginLeft - cachedOrientedMarginRight;
-  // Reserve a fixed gutter for the "> " cursor marker on .md files. Taken out of
-  // viewportWidth before wrapping so the marker never shifts the text, and before
-  // loadPageIndexCache() reads it — viewportWidth is a cache validation field, so
-  // an existing .md index rebuilds exactly once and stays consistent afterwards.
+  // Reserve a fixed gutter on .md files for the checkbox drawn by renderPage().
+  // Taken out of viewportWidth before wrapping so the box never shifts the text,
+  // and before loadPageIndexCache() reads it — viewportWidth is a cache validation
+  // field, so an existing .md index rebuilds exactly once and stays consistent
+  // afterwards. Its width is still measured from "> ": the box is sized to fit
+  // whatever gutter that yields, which keeps viewportWidth unchanged from the
+  // text-cursor era and so costs one cache generation less.
   markerWidth = isMarkdown ? renderer.getTextAdvanceX(cachedFontId, "> ", EpdFontFamily::REGULAR) : 0;
   viewportWidth -= markerWidth;
-  // The three mark states are not the same width in a proportional font, so
-  // "- [ ]", "- [x]" and "- [X]" do not measure alike. Left alone, toggling a line
-  // sitting on a wrap boundary would add or remove a visual line while
-  // pageOffsets[currentPage + 1] stays put, and the displaced text would fall out
-  // of every page. Measuring every state at the width of 'x' keeps wrapping fixed.
-  // Computed before loadPageIndexCache()/buildPageIndex() below so the index is
-  // built with the same measurements render() will use.
-  if (isMarkdown) {
-    const int advX = renderer.getTextAdvanceX(cachedFontId, "x", EpdFontFamily::REGULAR);
-    checkboxMarkPadSpace = advX - renderer.getTextAdvanceX(cachedFontId, " ", EpdFontFamily::REGULAR);
-    checkboxMarkPadUpper = advX - renderer.getTextAdvanceX(cachedFontId, "X", EpdFontFamily::REGULAR);
-  } else {
-    checkboxMarkPadSpace = 0;
-    checkboxMarkPadUpper = 0;
-  }
   const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
   const int lineHeight = renderer.getLineHeight(cachedFontId);
 
@@ -340,14 +328,6 @@ void TxtReaderActivity::initializeReader() {
       offsetHistory.back() = currentOffset;
     }
   }
-
-  // TEMPORARY instrumentation (F-2): confirms the checkbox glyphs are the same
-  // width, i.e. that toggling cannot change how a line wraps.
-  LOG_INF("TRS", "advance space=%d x=%d X=%d | pad space=%d upper=%d marker=%d md=%d",
-          renderer.getTextAdvanceX(cachedFontId, " ", EpdFontFamily::REGULAR),
-          renderer.getTextAdvanceX(cachedFontId, "x", EpdFontFamily::REGULAR),
-          renderer.getTextAdvanceX(cachedFontId, "X", EpdFontFamily::REGULAR), checkboxMarkPadSpace,
-          checkboxMarkPadUpper, markerWidth, isMarkdown ? 1 : 0);
 
   initialized = true;
 }
@@ -480,16 +460,43 @@ bool matchCheckbox(const char* line, size_t len, size_t& markPos, char& mark) {
 }
 }  // namespace
 
-// Width to add so a checkbox mark measures as if it were 'x', keeping wrapping
-// identical across all three states. Negative for 'X', which is wider than 'x'.
-int TxtReaderActivity::markPadFor(const char mark) const {
-  switch (mark) {
-    case ' ':
-      return checkboxMarkPadSpace;
-    case 'X':
-      return checkboxMarkPadUpper;
-    default:  // 'x' — already the reference width
-      return 0;
+// Draw one task list checkbox into the marker gutter.
+//
+// The box keeps the same shape, size and position in all four states; selection
+// is expressed by inverting the gutter cell behind it and drawing the box in
+// white. Filling the box itself would read as "checked" and mix the two axes.
+void TxtReaderActivity::drawCheckbox(const int gutterX, const int y, const int lineHeight, const bool checked,
+                                     const bool selected) const {
+  // Sized entirely from the gutter and the line, with no nominal cap: a 12 px box
+  // beside an 18 pt line reads as an afterthought, and the gutter already scales
+  // with the reading font because it is measured from "> ". The margins left over
+  // are 2 px at the sides and 4 px above and below.
+  const int side = std::min(markerWidth - 4, lineHeight - 8);
+  if (side < CHECKBOX_MIN_SIDE) return;  // no room: leave the gutter blank
+
+  const int bx = gutterX + (markerWidth - side) / 2;
+  const int by = y + (lineHeight - side) / 2;
+
+  if (selected) renderer.fillRect(gutterX, y, markerWidth, lineHeight, true);
+  const bool ink = !selected;  // white box over an inverted cell
+
+  renderer.drawRect(bx, by, side, side, ink);
+  if (checked) {
+    // A cross, not a tick: it is symmetric, so inverting the cell cannot change
+    // its shape, and it puts ink in all four corners of the box, which a tick
+    // leaves empty. See docs-jp/f2-checkbox-glyph.md for the four-way comparison.
+    const int inner = side - 2;  // inside the 1 px border
+    // Weight tracks the box so the cross looks the same at 8 pt and at 18 pt.
+    const int stroke = std::max(2, side / 6);
+    // drawLine() thickens downwards only (y + i), so the plain line has to end
+    // stroke-1 px high for the thickened band to land on the last inner row.
+    // Nothing then spills onto the border and no clipping is needed.
+    const int x0 = bx + 1;
+    const int y0 = by + 1;
+    const int x1 = x0 + inner - 1;
+    const int y1 = y0 + inner - stroke;
+    renderer.drawLine(x0, y0, x1, y1, stroke, ink);
+    renderer.drawLine(x1, y0, x0, y1, stroke, ink);
   }
 }
 
@@ -561,20 +568,30 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // The match itself runs for every .md line, not just when outCheckboxes was
     // asked for: buildPageIndex() must wrap exactly as render() does, or the two
     // disagree on where pages start.
-    char lineMark = 0;  // 0 when this source line is not a task list item
+    //
+    // The notation itself is not laid out: prefixLen skips it so wrapping starts
+    // at the item's text, and renderPage() draws a box in the marker gutter
+    // instead. Because none of "[ ]", "[x]", "[X]" is ever measured, toggling a
+    // line can no longer move a wrap point — which is what the width
+    // normalisation that used to live here existed to prevent.
+    size_t prefixLen = 0;
     if (isMarkdown) {
       size_t markPos = 0;
       char mark = 0;
       if (matchCheckbox(line.c_str(), displayLen, markPos, mark)) {
-        lineMark = mark;
         if (outCheckboxes != nullptr) {
           outCheckboxes->push_back({static_cast<int>(outLines.size()), offset + pos + markPos, mark != ' '});
         }
+        prefixLen = markPos + 2;  // past the closing ']'
+        if (prefixLen < displayLen && line[prefixLen] == ' ') prefixLen++;
       }
     }
 
-    // Track position within this source line (in bytes from pos)
-    size_t lineBytePos = 0;
+    // Track position within this source line (in bytes from pos). Starts past the
+    // task list notation when there is one: `pos` is advanced from this, so the
+    // skipped bytes stay accounted for and the offsets in outCheckboxes — which
+    // toggleSelectedCheckbox() writes through — keep naming the real file bytes.
+    size_t lineBytePos = prefixLen;
 
     // Emit at least one visual line for each source line (including blank lines),
     // then continue with wrapping when needed. The remainder is carried as an
@@ -589,13 +606,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       const char* segment = line.c_str() + lineBytePos;
       const size_t segmentLen = displayLen - lineBytePos;
 
-      // Charge the mark at the width of 'x' whatever state it is in, but only
-      // while this segment still holds it — once a break has consumed the mark,
-      // the rest of the source line measures normally.
-      const int markPad = (lineMark != 0 && lineBytePos == 0) ? markPadFor(lineMark) : 0;
-
-      size_t breakPos =
-          renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR, true, markPad);
+      size_t breakPos = renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR);
 
       if (breakPos >= segmentLen) {
         outLines.emplace_back(segment, segmentLen);
@@ -719,17 +730,27 @@ void TxtReaderActivity::renderPage() {
   const int contentWidth = viewportWidth;
 
   // Text starts after the marker gutter (zero-width unless this is a .md file),
-  // so the cursor marker never overlaps the text at any alignment.
+  // so a checkbox never overlaps the text at any alignment.
   const int textLeft = cachedOrientedMarginLeft + markerWidth;
-  const int selectedLine = (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size()))
-                               ? pageCheckboxes[selectedCheckbox].lineIndex
-                               : -1;
 
-  // Render text lines with alignment
-  auto renderLines = [&]() {
+  // Render text lines with alignment. drawBoxes is false for the prewarm scan
+  // pass, which accumulates text without drawing — rects are not text and would
+  // be painted for real there, to no effect but the cost.
+  auto renderLines = [&](const bool drawBoxes) {
     int y = cachedOrientedMarginTop;
     int lineIndex = 0;
     for (const auto& line : currentPageLines) {
+      // Outside the empty-line guard below: a "- [ ]" with no text after it
+      // still has a box to draw.
+      if (drawBoxes) {
+        for (size_t i = 0; i < pageCheckboxes.size(); i++) {
+          if (pageCheckboxes[i].lineIndex == lineIndex) {
+            drawCheckbox(cachedOrientedMarginLeft, y, lineHeight, pageCheckboxes[i].checked,
+                         static_cast<int>(i) == selectedCheckbox);
+            break;
+          }
+        }
+      }
       if (!line.empty()) {
         int x = textLeft;
         const bool lineIsRtl = BidiUtils::startsWithRtl(line.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
@@ -760,11 +781,6 @@ void TxtReaderActivity::renderPage() {
             break;
         }
 
-        // Drawn into the reserved gutter as a separate call: the line string is
-        // never modified, so wrapping stays identical whatever is selected.
-        if (lineIndex == selectedLine) {
-          renderer.drawText(cachedFontId, cachedOrientedMarginLeft, y, "> ");
-        }
         renderer.drawText(cachedFontId, x, y, line.c_str());
       }
       y += lineHeight;
@@ -775,17 +791,17 @@ void TxtReaderActivity::renderPage() {
   // Font prewarm: scan pass accumulates text, then prewarm, then real render
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
-  renderLines();  // scan pass — text accumulated, no drawing
+  renderLines(false);  // scan pass — text accumulated, no drawing
   scope.endScanAndPrewarm();
 
   // BW rendering
-  renderLines();
+  renderLines(true);
   renderStatusBar();
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
 
   if (SETTINGS.textAntiAliasing) {
-    ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
+    ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(true); });
   }
   // scope destructor clears font cache via FontCacheManager
 }
