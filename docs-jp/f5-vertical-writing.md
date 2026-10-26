@@ -87,9 +87,15 @@ linesPerPage = viewportHeight / renderer.getLineHeight(cachedFontId);
 | 8 | 19 | 16 | −4 | **16.6875 px** |
 | 10 | 24 | 20 | −5 | **20.8125 px** |
 | 12 | 29 | 24 | −6 | **25.0000 px** |
-| 14 | 42 | 34 | −9 | 【未計測】 |
-| 16 | 48 | 39 | −10 | 【未計測】 |
-| 18 | 54 | 44 | −11 | 【未計測】 |
+| 14 | 42 | 34 | −9 | **29.1875 px** |
+| 16 | 48 | 39 | −10 | **33.3125 px** |
+| 18 | 54 | 44 | −11 | **37.5000 px** |
+
+**2026-10-27 に全 pt を実測** (`scripts/cpfont_metrics.py`)。
+**全角 em は pt に完全比例する** (pt x 150/72)。
+**`advanceY` は比例しない** — 8/10/12 pt で em の 1.14〜1.16 倍、
+14/16/18 pt で **1.44 倍**。この 6 面は同一設計のフォントではない
+(仕様書 §3.6)。
 
 **かな・漢字 18 文字を測って advance が 1 種類しかなかった。**完全な等幅である。
 
@@ -138,10 +144,135 @@ loadPageAtOffset(offset, outLines, nextOffset)      // ちょうど linesPerPage
 **「視覚行」を「視覚列」に読み替える。**`outLines` の型も中身も変えない。
 
 ```
-columnWidth    = advanceY             // 列の太さ。横書きの行送りと同じ値で始める
+columnWidth    = em * COLUMN_RATIO    // 列の太さ。★ advanceY ではない (下記)
 columnsPerPage = viewportWidth  / columnWidth
 charsPerColumn = viewportHeight / em  // 全角等幅なので割り算 1 回 (§1.4)
 ```
+
+#### ★ `columnWidth` を `advanceY` に紐づけてはならない (2026-10-27 変更)
+
+**初版は `columnWidth = advanceY` だった。取り下げる。**
+
+| # | 理由 |
+|---|---|
+| 1 | **`advanceY / em` がこの端末で 1.14〜1.16 と 1.44 に分かれている。**12 → 14 pt で列の間隔が飛ぶ |
+| 2 | **しかもこれは利用者のフォント次第で任意の値を取る** (仕様書 §3.6)。フォントを替えただけで組版が崩れる |
+| 3 | **`advanceY` は横組みの行送りであって、縦組みの列送りではない。**たまたま近い値なだけで、根拠が無い |
+
+**12 → 14 pt で列数がどう動くか** (実測値から計算):
+
+| モデル | 12 pt | 14 pt | 減少 |
+|---|---|---|---|
+| `advanceY` (初版) | 16 列 | **11 列** | **−31%** |
+| `em x 1.3` | 14 列 | 12 列 | −14% |
+
+**`em` 基準なら、列数は字の大きさだけで決まる。**
+フォントの縦メトリクスという**利用者依存の量**が組版に混ざらない。
+
+#### `COLUMN_RATIO` の候補
+
+**12 pt (em 25 px) / viewport 464 x 754 px での実測ベースの計算。**
+`charsPerColumn = 754 / 25 = 30 字`。
+
+| 比 | `columnWidth` | 列数 | 1 ページの字数 | 横書き現状比 | 行間 |
+|---|---|---|---|---|---|
+| 1.0 | 25 | **18** | 540 | +15% | **0。列が密着する** |
+| 1.15 | 29 | **16** | 480 | +3% | 0.15 em |
+| **1.3** | **32** | **14** | **420** | **−10%** | **0.3 em** |
+| 1.5 | 38 | **12** | 360 | −23% | 0.5 em |
+| 1.75 | 44 | **10** | 300 | −36% | 0.75 em |
+
+**横書きの現状**: 26 行 x 18 字 = **468 字/ページ** (12 pt)。
+
+**日本語の縦組みの慣習**: 書籍の本文は**行間 0.5〜0.75 em
+(= 比 1.5〜1.75)** が一般的。新聞や詰めた文庫で 1.2〜1.3。
+**比 1.0 は列が密着するので読めない。**
+
+> **⚠️ 慣習の値は紙の本のものである。**480 x 800 の電子ペーパーで
+> 比 1.5 を採ると 1 ページ 360 字まで落ち、**ページ送りが 1.3 倍に増える。**
+> 書き換えが 1〜2 秒かかる端末では、これは実際の不便になる。
+
+### ★ 確定: `COLUMN_RATIO = 1.3` (2026-10-27)
+
+0.3 em の間隔は列の区切りとして十分に見え、密度の損失は横書き比 −10% に収まる。
+**12 pt で 14 列 x 30 字 = 420 字/ページ。**
+
+#### 設定項目 — **`SETTINGS.lineSpacing` の enum を流用する**
+
+**新しい設定は作らない。**`TIGHT` / `NORMAL` / `WIDE` の 3 段が既にあり、
+UI も翻訳も揃っている。
+
+**ただし既存の係数をそのまま掛けてはならない。**
+`getReaderLineCompression()` が返すのは 0.95 / 1.0 / 1.1 で、
+**幅が狭すぎて列数が動かない**:
+
+| 案 | TIGHT | NORMAL | WIDE |
+|---|---|---|---|
+| 既存の係数を 1.3 に掛ける | 比 1.235 → **14 列** | 比 1.3 → **14 列** | 比 1.43 → 12 列 |
+| **★ 縦書き専用の写像 (確定)** | **比 1.15 → 16 列** | **比 1.3 → 14 列** | **比 1.5 → 12 列** |
+
+**既存係数だと TIGHT と NORMAL が同じ 14 列になり、設定が 2 段にしか
+見えない。**縦書き専用の写像にすれば 3 段がそれぞれ別の結果になる。
+
+```
+縦書きの列幅:
+  COLUMN_RATIO = { TIGHT: 1.15, NORMAL: 1.30, WIDE: 1.50 }[SETTINGS.lineSpacing]
+  columnWidth  = round(em * COLUMN_RATIO)
+```
+
+#### ★ `lineSpacing` は索引キャッシュの検証項目に**入っていない** (2026-10-27 確認)
+
+`TxtReaderActivity::loadPageIndexCache()` を読んで確認した。
+**検証しているのは 8 項目で、`lineSpacing` は無い**:
+
+```
+magic / version / fileSize / viewportWidth / linesPerPage /
+fontId / screenMargin / paragraphAlignment
+```
+
+**横書きの TXT が `lineSpacing` を見ていないので、入っている必要も無かった。**
+`linesPerPage = viewportHeight / getLineHeight(fontId)` は圧縮を掛けていない。
+`getReaderLineCompression()` の呼び出し元は `TextSettingsPreview.cpp` と
+`CrossPointSettings.cpp` だけである。
+
+**→ 縦書きで流用した瞬間、F-2 と同型の罠になる** (設定を変えても古い索引が
+再利用される)。**手当てが要る。**
+
+#### 手当て — **`lineSpacing` を足すのではなく、`columnsPerPage` と
+`charsPerColumn` を検証する**
+
+**ページの区切りを決めているのはこの 2 つの積だけである。**
+
+```
+1 ページの収容文字数 = columnsPerPage * charsPerColumn
+columnsPerPage = viewportWidth  / columnWidth      // lineSpacing はここに効く
+charsPerColumn = viewportHeight / em               // 向き・ステータスバーがここに効く
+```
+
+| 検証する値 | 捕まえられる変化 |
+|---|---|
+| **`columnsPerPage`** | **`lineSpacing` の変更**、`viewportWidth` の変更、フォントサイズ |
+| **`charsPerColumn`** | **`viewportHeight` の変更** (向き・ステータスバーの構成)、フォントサイズ |
+
+**`lineSpacing` そのものを検証項目にする必要は無い。**比が変わっても
+`columnsPerPage` が変わらないなら、**ページの区切りは同じ位置に出る**
+(x 座標だけが変わり、それは描画時に計算される)。**再利用して正しい。**
+
+> **⚠️ 横書きでは `charsPerColumn` に相当する検証が `linesPerPage` で
+> 済んでいた** (`viewportHeight` が `linesPerPage` に畳み込まれるため)。
+> **縦書きでは `viewportWidth` が `columnsPerPage` に畳み込まれ、
+> `viewportHeight` を畳み込む先が無い。**
+> `viewportWidth` だけを検証していると、**向きを変えても索引が
+> 再利用されうる。**ここは横書きと非対称である。
+
+**これは形式変更なので `CACHE_VERSION` の繰り上げを伴う** (6 → 7)。
+縦書き段階1 を入れるときに 1 回だけ上げる。
+
+#### 段階2 以降に送る項目
+
+| # | 内容 |
+|---|---|
+| 1 | **横書きの TXT も `lineSpacing` を見るようにするか。**現在は無視している。**縦書き段階1 のスコープ外**。やるなら `linesPerPage` が変わるので `CACHE_VERSION` をさらに 1 つ上げる |
 
 **どちらを採るか**: **両方いる。**`columnsPerPage` が「1 ページに何列」、
 `charsPerColumn` が「1 列に何文字」で、横書きの `linesPerPage` と
@@ -602,3 +733,5 @@ isMarkdown = hasMarkdownExtension(...) && !txt->isConverted() && !SETTINGS.verti
 | 版数 | 日付 | 内容 |
 |---|---|---|
 | v0.1 | 2026-10-26 | 初版。実測値 (`.cpfont` のメトリクスと全角等幅性) を踏まえた設計。ページ境界のオフセットが向きに依存しないことを確認し、F-9 の資産がそのまま使えると判断。**U+FE10-FE19 / U+FE30-FE4F を採らず、レンダラ側の回転＋オフセットに一本化** (小書きかなに縦書き形が存在せずオフセットが必須になるため → §3.2)。**ASCII と半角カナも 1 文字 = 1 マスで正立と決定** — 割り算のモデルを保つため (§3.5)。採らなかった案を §6.4 に、残る未調査 4 件を §7 に整理 |
+| v0.2 | 2026-10-27 | **`columnWidth = advanceY` を取り下げ、`em x COLUMN_RATIO` に変更。**理由は `advanceY / em` が利用者のフォント依存で任意の値を取ること (この端末では 1.14〜1.16 と 1.44 に分かれ、12 → 14 pt で列数が −31% 飛ぶ)。**既定比 1.3 を推奨** (12 pt で 14 列 / 420 字、横書き現状比 −10%)。**設定は新設せず `SETTINGS.lineSpacing` の enum を縦書き用の比 1.15/1.3/1.5 に写す。**§1.4 の em 表を全 pt 実測値で埋めた |
+| v0.3 | 2026-10-27 | **`COLUMN_RATIO = 1.3` を確定。**`lineSpacing` の enum を縦書き専用に 1.15/1.3/1.5 へ写す表を確定として記載 (既存係数 0.95/1.0/1.1 では TIGHT と NORMAL が同じ 14 列になるため)。**`lineSpacing` が索引キャッシュの検証項目に入っていないことをコードで確認** — 横書きが見ていないので入っている必要が無かった。**手当ては `lineSpacing` を足すのではなく `columnsPerPage` と `charsPerColumn` を検証する**ことと決定 (ページの区切りはこの 2 つの積だけで決まる)。**縦書きでは `viewportHeight` を畳み込む先が無く、横書きと非対称**である点を記録。`CACHE_VERSION` は 6 → 7。横書きも `lineSpacing` を見るようにするかは**段階2 以降**に送った |

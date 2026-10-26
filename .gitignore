@@ -32,3 +32,6 @@ lib/EpdFont/scripts/output/
 /sdkconfig.*
 sdkconfig.sticky
 flake.*
+
+# A8 の見本画像 (scripts/checkbox_mockup.py で再生成できる)
+docs-jp/mockups/
