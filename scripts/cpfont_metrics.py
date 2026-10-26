@@ -94,6 +94,53 @@ class CpFont:
         self.f.seek(glyphs_off + idx * GLYPH_SIZE)
         return struct.unpack('<H', self.f.read(GLYPH_SIZE)[2:4])[0]
 
+    def glyph(self, cp, style=0):
+        """グリフのメタデータを dict で返す。収録されていなければ None。"""
+        idx = self.glyph_index(cp, style)
+        if idx is None:
+            return None
+        s = self.styles[style]
+        off = s['dataOffset'] + s['intervalCount'] * INTERVAL_SIZE + idx * GLYPH_SIZE
+        self.f.seek(off)
+        r = self.f.read(GLYPH_SIZE)
+        return dict(width=r[0], height=r[1],
+                    advanceX=struct.unpack('<H', r[2:4])[0],
+                    left=struct.unpack('<h', r[4:6])[0],
+                    top=struct.unpack('<h', r[6:8])[0],
+                    dataLength=struct.unpack('<H', r[8:10])[0],
+                    dataOffset=struct.unpack('<I', r[12:16])[0])
+
+    def bitmap_base(self, style=0):
+        """computeStyleFileOffsets() の写し。ビットマップ部の先頭を返す。"""
+        s = self.styles[style]
+        glyphs = s['dataOffset'] + s['intervalCount'] * INTERVAL_SIZE
+        kl = glyphs + s['glyphCount'] * GLYPH_SIZE
+        kr = kl + s['kernLeftEntryCount'] * 3
+        km = kr + s['kernRightEntryCount'] * 3
+        lig = km + s['kernLeftClassCount'] * s['kernRightClassCount']
+        return lig + s['ligaturePairCount'] * 8
+
+    def pixels(self, cp, style=0):
+        """グリフを [y][x] の 0..3 (0=黒 3=白) で返す。renderCharImpl と同じ展開。"""
+        g = self.glyph(cp, style)
+        if g is None or g['dataLength'] == 0:
+            return g, None
+        self.f.seek(self.bitmap_base(style) + g['dataOffset'])
+        data = self.f.read(g['dataLength'])
+        grid = [[3] * g['width'] for _ in range(g['height'])]
+        pos = 0
+        for gy in range(g['height']):
+            for gx in range(g['width']):
+                if self.is2bit:
+                    byte = data[pos >> 2]
+                    shift = (3 - (pos & 3)) * 2
+                    grid[gy][gx] = 3 - ((byte >> shift) & 0x3)
+                else:
+                    byte = data[pos >> 3]
+                    grid[gy][gx] = 0 if (byte >> (7 - (pos & 7))) & 1 else 3
+                pos += 1
+        return g, grid
+
     def kern_classes(self, style=0):
         """(左クラス表, 右クラス表) を {codepoint: classId} で返す。"""
         s = self.styles[style]
