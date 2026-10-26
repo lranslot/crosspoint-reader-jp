@@ -33,5 +33,6 @@ lib/EpdFont/scripts/output/
 sdkconfig.sticky
 flake.*
 
-# A8 の見本画像 (scripts/checkbox_mockup.py で再生成できる)
+# 見本画像は再生成できるので無視する (scripts/checkbox_mockup.py)
+# 実機から取った docs-jp/screenshots/ は追跡する — 二度と撮れないため
 docs-jp/mockups/
