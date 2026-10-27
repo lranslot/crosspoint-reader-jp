@@ -46,8 +46,10 @@ NOT_THE_DEVICE = """\
     2. グレースケール (renderAntiAliased) - ここでは BW だけを描く。
     3. viewport の実寸 - 余白とステータスバーは実行時に UITheme が決める。
        ここではスクリーンショットから実測した値を固定で使っている。
-    4. TextRotation::Rotated90CW の座標規約 - 横向きラベル用に作られており、
-       約物 1 文字に使うときの基準が違う可能性がある (確認項目 ①)。
+    4. TextRotation::Rotated90CW は縦組みには使えない (2026-10-28 に実測)。
+       「左 -> 下」に写すため括弧 12 字すべてで向きが逆になる。
+       ここでは逆回転 (blit_vertical_rot) で正しい向きを描いている。
+       ★ ファーム側には新しい回転を足す必要がある。
 ================================================================"""
 
 
@@ -103,6 +105,32 @@ def blit(page, grid, g, ascender, cursor_x, cursor_y, rotated):
                 sx, sy = outer, inner_base - gx
             else:
                 sx, sy = inner_base + gx, outer
+            if 0 <= sx < SCREEN_W and 0 <= sy < SCREEN_H:
+                page[sy][sx] = INK
+
+
+def blit_vertical_rot(page, grid, g, asc, cell_left, cell_top, cell):
+    """縦組み用の回転。**ファームの Rotated90CW とは逆向き。**
+
+    実測で分かったこと (2026-10-28): Rotated90CW は「左 → 下」に写す。
+    縦組みの約物は「左 → 上」でなければならず、14 字すべてが 180 度ずれる。
+    ここでは正しい向きを描く。ファーム側には新しい回転が要る。
+
+      screenX = cell_left + (cell - inkTop - h) + (h - 1 - gy)
+      screenY = cell_top  + (cell - left  - w) + gx
+
+    上端の余白が左端の余白に、左端の余白が上端の余白になる — つまり
+    「縦の位置」と「横の位置」が入れ替わる。これにより 「 は上、」 は下へ行く。
+    """
+    w, h = g['width'], g['height']
+    ink_top = asc - g['top']
+    bx = cell_left + max(0, cell - ink_top - h)
+    by = cell_top + max(0, cell - g['left'] - w)
+    for gy in range(h):
+        for gx in range(w):
+            if grid[gy][gx] >= 3:
+                continue
+            sx, sy = bx + (h - 1 - gy), by + gx
             if 0 <= sx < SCREEN_W and 0 <= sy < SCREEN_H:
                 page[sy][sx] = INK
 
@@ -168,87 +196,171 @@ def write_zoom(path, page, x0, y0, w, h, n=6):
 
 # --- 確認用の 3 項目 ---------------------------------------------------------
 
-def diag(fnt, asc, em, cell, colw, out_dir):
-    """① 回転の規約 ② U+2026 ③ 小書きかな。"""
-    cols_x = lambda i: MARGIN_L + (SCREEN_W - MARGIN_L - MARGIN_R) - (i + 1) * colw
+def corner_offset(g, asc, cell, margin):
+    """墨をマスの右上の角に寄せる dx, dy を返す。
 
-    # --- ① Rotated90CW の規約 ---
+    em 比ではなく、グリフの墨の箱から直接求める。フォントが変わっても
+    余白が変わらない。利用者がフォントを作れる以上 (仕様書 3.6)、
+    比で持つと端末ごとに寄り方が変わってしまう。
+    """
+    ink_x0 = g['left']
+    ink_y0 = asc - g['top']
+    want_x0 = cell - margin - g['width']
+    want_y0 = margin
+    return want_x0 - ink_x0, want_y0 - ink_y0
+
+
+def ink_box(g, asc, dx, dy):
+    """マス座標での墨の (x0, y0, x1, y1)。"""
+    x0 = g['left'] + dx
+    y0 = asc - g['top'] + dy
+    return x0, y0, x0 + g['width'] - 1, y0 + g['height'] - 1
+
+
+def cell_frame(page, x, y, cell, step=3):
+    """マスの上辺・下辺を点線で示す。"""
+    for k in range(0, cell, step):
+        if y < SCREEN_H:
+            page[y][x + k] = INK
+        if y + cell - 1 < SCREEN_H:
+            page[y + cell - 1][x + k] = INK
+
+
+def font_dot(fnt):
+    """フォント自身の点を 1 つ取り出す。U+2026 の左端の点。
+
+    自前で丸を描くと書体と合わない。字の中の点をそのまま使えば、
+    利用者がどのフォントを入れても点の大きさと形が本文と揃う。
+    """
+    g, grid = fnt.pixels(0x2026)
+    cols = [x for x in range(g['width']) if any(grid[y][x] < 3 for y in range(g['height']))]
+    runs = []
+    for x in cols:
+        if runs and x == runs[-1][-1] + 1:
+            runs[-1].append(x)
+        else:
+            runs.append([x])
+    first = runs[0]
+    dot = [[grid[y][x] for x in first] for y in range(g['height'])]
+    return dot, len(first), g['height']
+
+
+def stamp(page, dot, x, y):
+    for gy, row in enumerate(dot):
+        for gx, v in enumerate(row):
+            if v < 3 and 0 <= y + gy < SCREEN_H and 0 <= x + gx < SCREEN_W:
+                page[y + gy][x + gx] = INK
+
+
+# --- 確認1: 括弧の回転だけ ---------------------------------------------------
+
+def diag_brackets(fnt, asc, cell, colw, out_dir):
+    """括弧だけ。1 字 1 マス、マスの左に横書きでその字を添える。"""
+    chars = '（）「」『』〔〕【】〈〉'
     page = blank()
-    draw_h(page, fnt, asc, MARGIN_L, 8, '確認1 回転の規約')
-    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 6, '左列=回転あり 右列=回転なし')
-    top = 8 + (asc + 6) * 2 + 10
-    for i, text in enumerate(['「あ」（い）', '「あ」（い）']):
-        x = cols_x(i)
-        draw_h(page, fnt, asc, x, top - asc - 4, 'rot' if i else 'none')
-        for j, ch in enumerate(text):
-            # 右の列 (i=0) は回転させずに描いて、横書きのままの形を見せる
-            if i == 0:
-                g, grid = fnt.pixels(ord(ch))
-                if g:
-                    blit(page, grid, g, asc, x, top + j * cell + asc, False)
-            else:
-                draw_cell(page, fnt, asc, x, top + j * cell, cell, ch)
-    # マスの枠を薄く示す (1 px の点線)
-    for i in range(2):
-        x = cols_x(i)
-        for j in range(6):
-            y = top + j * cell
-            for k in range(0, cell, 3):
-                page[y][x + k] = INK
-                if y + cell - 1 < SCREEN_H:
-                    page[y + cell - 1][x + k] = INK
-    write_png(out_dir / 'diag1_rotation.png', page)
-    write_zoom(out_dir / 'diag1_rotation_zoom.png', page, cols_x(3) - 4, top - 6, colw * 4 + 12, cell * 6 + 12)
+    draw_h(page, fnt, asc, MARGIN_L, 8, '確認1 括弧の回転')
+    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 4, '左の小字=元の形 fixed=正しい向き fw=ファーム')
+    top = 8 + (asc + 4) * 2 + 8
+    col_fw = SCREEN_W - MARGIN_R - colw
+    col_ok = col_fw - colw
+    label_x = col_ok - 40
+    draw_h(page, fnt, asc, col_fw, top - asc - 4, 'fw')
+    draw_h(page, fnt, asc, col_ok, top - asc - 4, 'fixed')
+    for j, ch in enumerate(chars):
+        y = top + j * cell
+        if y + cell > SCREEN_H - MARGIN_B:
+            break
+        draw_h(page, fnt, asc, label_x, y, ch)            # 元の形 (横書きのまま)
+        draw_cell(page, fnt, asc, col_fw, y, cell, ch)    # ファームの回転
+        g, grid = fnt.pixels(ord(ch))
+        blit_vertical_rot(page, grid, g, asc, col_ok, y, cell)  # 正しい向き
+        cell_frame(page, col_fw, y, cell)
+        cell_frame(page, col_ok, y, cell)
+    write_png(out_dir / 'c1_brackets.png', page)
+    write_zoom(out_dir / 'c1_brackets_zoom.png', page,
+               label_x - 4, top - 4, colw * 2 + 48, cell * 12 + 8, n=6)
 
-    # --- ② U+2026 の扱い 3 通り + U+2025 ---
+
+# --- 確認2: 三点リーダだけ ---------------------------------------------------
+
+def diag_ellipsis(fnt, asc, cell, colw, out_dir):
+    """c (2 つで 1 マス) と 自前描画 (点 3 つ) の 2 列だけ。"""
     page = blank()
     draw_h(page, fnt, asc, MARGIN_L, 8, '確認2 三点リーダ')
-    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 6, 'a=中央寄せ b=回転 c=2つで1マス d=二点')
-    top = 8 + (asc + 6) * 2 + 10
+    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 4, '右 = c 字形2つで1マス / 左 = 自前で点3つ')
+    top = 8 + (asc + 4) * 2 + 8
     g26, _ = fnt.pixels(0x2026)
-    adv26 = (g26['advanceX'] + 8) >> 4 if g26 else 0
-    for i, mode in enumerate(['a', 'b', 'c', 'd']):
-        x = cols_x(i)
-        draw_h(page, fnt, asc, x, top - asc - 4, mode)
-        for j in range(4):
+    adv26 = (g26['advanceX'] + 8) >> 4
+    dot, dw, dh = font_dot(fnt)
+
+    for i in range(2):
+        x = SCREEN_W - MARGIN_R - (i + 1) * colw
+        draw_h(page, fnt, asc, x, top - asc - 4, 'c' if i == 0 else 'self')
+        for j in range(5):
             y = top + j * cell
-            if mode == 'a':      # 1 マスに中央寄せ、回転なし
-                g, grid = fnt.pixels(0x2026)
-                blit(page, grid, g, asc, x + (cell - adv26) // 2, y + asc, False)
-            elif mode == 'b':    # 1 マスに中央寄せ、90 度回転
-                g, grid = fnt.pixels(0x2026)
-                blit(page, grid, g, asc, x + (cell - adv26) // 2, y + cell, True)
-            elif mode == 'c':    # 2 つで 1 マス (回転)
+            if i == 0:
+                # 字形を 2 つ、マスの中に縦に積む (回転して縦の点列にする)
                 g, grid = fnt.pixels(0x2026)
                 blit(page, grid, g, asc, x, y + cell, True)
                 blit(page, grid, g, asc, x, y + cell - adv26, True)
-            else:                # ‥ U+2025 (全角)
-                draw_cell(page, fnt, asc, x, y, cell, '‥')
-        for j in range(4):
-            y = top + j * cell
-            for k in range(0, cell, 3):
-                page[y][x + k] = INK
-    write_png(out_dir / 'diag2_ellipsis.png', page)
-    write_zoom(out_dir / 'diag2_ellipsis_zoom.png', page, cols_x(3) - 4, top - 6, colw * 4 + 12, cell * 6 + 12)
+            else:
+                # 1 マスに点 3 つ。マスの高さに均等配置。
+                # 2 マス続けば 6 点が等間隔になるよう、間隔は cell/3。
+                step = cell / 3.0
+                for k in range(3):
+                    cy = y + round(step * (k + 0.5)) - dh // 2
+                    stamp(page, dot, x + (cell - dw) // 2, cy)
+            cell_frame(page, x, y, cell)
+    write_png(out_dir / 'c2_ellipsis.png', page)
+    write_zoom(out_dir / 'c2_ellipsis_zoom.png', page,
+               SCREEN_W - MARGIN_R - colw * 2 - 4, top - 4, colw * 2 + 8, cell * 5 + 8, n=8)
 
-    # --- ③ 小書きかな ---
+
+# --- 確認3: 、。の寄せだけ ---------------------------------------------------
+
+def diag_kuten(fnt, asc, cell, colw, out_dir, margin=2):
+    """いまの em 比と、角に寄せきった版の 2 列だけ。"""
     page = blank()
-    draw_h(page, fnt, asc, MARGIN_L, 8, '確認3 寄せの比較')
-    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 6, '左=オフセットあり 右=なし')
-    top = 8 + (asc + 6) * 2 + 10
-    sample = 'あ、い。うっえょおぁかぃ'
-    for i, nudge in enumerate([False, True]):
-        x = cols_x(i)
-        draw_h(page, fnt, asc, x, top - asc - 4, 'nudge' if nudge else 'none')
+    draw_h(page, fnt, asc, MARGIN_L, 8, '確認3 句読点の寄せ')
+    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 4, '右 = いまの em 比 / 左 = 角に余白 %d px' % margin)
+    top = 8 + (asc + 4) * 2 + 8
+    sample = 'あ、い。う、え。'
+    report = []
+    for i in range(2):
+        x = SCREEN_W - MARGIN_R - (i + 1) * colw
+        draw_h(page, fnt, asc, x, top - asc - 4, 'corner' if i else 'ratio')
         for j, ch in enumerate(sample):
             y = top + j * cell
-            if y + cell > SCREEN_H - MARGIN_B:
-                break
-            draw_cell(page, fnt, asc, x, y, cell, ch, with_nudge=nudge)
-            for k in range(0, cell, 3):
-                page[y][x + k] = INK
-    write_png(out_dir / 'diag3_small_kana.png', page)
-    write_zoom(out_dir / 'diag3_small_kana_zoom.png', page, cols_x(3) - 4, top - 6, colw * 4 + 12, cell * 6 + 12)
+            g, grid = fnt.pixels(ord(ch))
+            if ch in NUDGE_TOP_RIGHT:
+                if i:
+                    dx, dy = corner_offset(g, asc, cell, margin)
+                else:
+                    dx = round(cell * NUDGE_TOP_RIGHT[ch][0])
+                    dy = round(cell * NUDGE_TOP_RIGHT[ch][1])
+                if j < 4:
+                    report.append((ch, 'corner' if i else 'ratio', dx, dy,
+                                   ink_box(g, asc, dx, dy), g))
+            else:
+                dx = dy = 0
+            blit(page, grid, g, asc, x + dx, y + asc + dy, False)
+            cell_frame(page, x, y, cell)
+    write_png(out_dir / 'c3_kuten.png', page)
+    write_zoom(out_dir / 'c3_kuten_zoom.png', page,
+               SCREEN_W - MARGIN_R - colw * 2 - 4, top - 4, colw * 2 + 8, cell * 8 + 8, n=8)
+
+    print('\n  マスの大きさ: %d x %d px' % (cell, cell))
+    print('  %-4s %-8s %-10s %-26s %s' % ('字', '方式', 'dx, dy', '墨の箱 (x0,y0)-(x1,y1)', '右/上の余白'))
+    for ch, mode, dx, dy, (x0, y0, x1, y1), g in report:
+        print('  %-4s %-8s %-10s (%2d,%2d)-(%2d,%2d)%10s 右 %d px / 上 %d px'
+              % (ch, mode, '%+d, %+d' % (dx, dy), x0, y0, x1, y1, '', cell - 1 - x1, y0))
+
+
+def diag(fnt, asc, em, cell, colw, out_dir):
+    diag_brackets(fnt, asc, cell, colw, out_dir)
+    diag_ellipsis(fnt, asc, cell, colw, out_dir)
+    diag_kuten(fnt, asc, cell, colw, out_dir)
+
 
 
 def strip_aozora(text):
