@@ -21,7 +21,7 @@
   python scripts/vertical_proof.py <本文.txt> <出力先> [--encoding cp932]
       本文を縦書きに組む
 
-  共通: [--font <.cpfont>] [--ratio 1.3] [--skip <先頭から飛ばす文字数>]
+  共通: [--font <.cpfont>] [--ratio 1.3] [--skip N] [--strip-aozora]
 """
 import pathlib
 import struct
@@ -53,7 +53,12 @@ NOT_THE_DEVICE = """\
 
 # --- 約物の表 (初期値。PC で詰める) -----------------------------------------
 # 値は em 比。dx は右が正、dy は下が正。
-ROTATE = set('「」『』（）〔〕〈〉【】ー〜‥…')
+# 回転する字。U+2015 (――) は青空文庫のダッシュで実際のテキストに出る。
+# 初版は入れ忘れており、実際の本文を食わせて気づいた。
+ROTATE = set('「」『』（）〔〕〈〉【】［］｛｝〝〟'
+             'ー〜‥…'
+             '—―'      # — EM DASH / ― HORIZONTAL BAR
+             '～')            # ～ FULLWIDTH TILDE
 SMALL_KANA = set('ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ')
 NUDGE_TOP_RIGHT = {'、': (0.5, -0.5), '。': (0.5, -0.5)}
 SMALL_KANA_NUDGE = (0.10, -0.10)
@@ -246,6 +251,34 @@ def diag(fnt, asc, em, cell, colw, out_dir):
     write_zoom(out_dir / 'diag3_small_kana_zoom.png', page, cols_x(3) - 4, top - 6, colw * 4 + 12, cell * 6 + 12)
 
 
+def strip_aozora(text):
+    """青空文庫記法のごく簡単な除去。
+
+    ⚠️ **ファームの lib/Aozora/AozoraStrip.cpp とは別物である。**
+    ここでやるのは注記 ［＃…］ とルビ ｜親《ルビ》 を落とすことだけで、
+    本家の挙動を再現したものではない。約物の見え方を確かめるために
+    記法が本文に混ざるのを避けるのが目的。
+    """
+    out = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '［' and text.startswith('［＃', i):
+            j = text.find('］', i)
+            i = len(text) if j < 0 else j + 1
+            continue
+        if c == '《':
+            j = text.find('》', i)
+            i = len(text) if j < 0 else j + 1
+            continue
+        if c == '｜':
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
 # --- 本文の組版 --------------------------------------------------------------
 
 def typeset(fnt, asc, em, cell, colw, text, out_dir):
@@ -316,6 +349,8 @@ def main():
             text = raw.decode('utf-8', 'replace')
             print('  (%s で読めなかったので utf-8 として読んだ)' % enc)
         text = text.replace('\r\n', '\n')
+        if '--strip-aozora' in sys.argv:
+            text = strip_aozora(text)
         skip = int(opt('--skip', '0'))
         if skip:
             text = text[skip:]
