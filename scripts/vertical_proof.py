@@ -30,6 +30,7 @@ import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from cpfont_metrics import CpFont  # noqa: E402
+from vertical_orientation_table import vo  # noqa: E402
 
 SCREEN_W, SCREEN_H = 480, 800
 # 12 pt のスクリーンショットから実測した余白 (f5 §11.4 の「合わせられない点 3」)
@@ -53,31 +54,59 @@ NOT_THE_DEVICE = """\
 ================================================================"""
 
 
-# --- 約物の表 (初期値。PC で詰める) -----------------------------------------
-# 値は em 比。dx は右が正、dy は下が正。
-# 回転する字。U+2015 (――) は青空文庫のダッシュで実際のテキストに出る。
-# 初版は入れ忘れており、実際の本文を食わせて気づいた。
-ROTATE = set('「」『』（）〔〕〈〉【】［］｛｝〝〟'
-             'ー〜‥…'
-             '—―'      # — EM DASH / ― HORIZONTAL BAR
-             '～')            # ～ FULLWIDTH TILDE
-SMALL_KANA = set('ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ')
-NUDGE_TOP_RIGHT = {'、': (0.5, -0.5), '。': (0.5, -0.5)}
-SMALL_KANA_NUDGE = (0.10, -0.10)
+# --- 縦書きの写像 (UTR #50 から機械的に) --------------------------------------
+#
+#   U   そのままマス中央に置く
+#   R   時計回り 90 度回転
+#   Tu  縦書き字形の代用。墨をマスの右上へ寄せる (回転しない)
+#   Tr  縦書き字形の代用。時計回り 90 度回転
+#
+# このフォントには縦書き字形 (U+FE10-FE19 / U+FE30-FE4F) が入っていないことを
+# 実測済み (仕様書 3.6)。Tu / Tr はここで代用する。
+#
+# 表は scripts/vertical_orientation_table.py (規格から自動生成)。
+# 手で列挙していたときは 30 字抜けていた。
+CORNER_MARGIN = 2          # Tu をマスの角から何 px 離すか
+
+# 半角数字を全角数字に写す。
+# UTR #50 では半角 0-9 は R (横倒し)、全角 ０-９ は U (正立)。
+# 写してから描けば規格どおりになり、実物の組版とも一致する。
+# **英字は写さない。**ｐａｒｅｎｔｈｅｓｉｓ は日本語の組版に無い形である。
+FULLWIDTH_DIGITS = {chr(0x30 + i): chr(0xFF10 + i) for i in range(10)}
 
 
-def rule(ch, with_nudge=True):
-    """(回転するか, dx比, dy比) を返す。
+# 段階1 の逸脱: ASCII の英字と記号は正立のまま 1 マスに置く。
+# UTR #50 では R (横倒し) だが、**実物の組版が回すのは「語」であって
+# 「字」ではない。**1 文字ずつ回しても縦に倒れた字が積まれるだけで、
+# 実物の html や "float start" のような横倒しの語にはならない。
+# 語をまとめて回すのは段階2。それまでは正立のほうが読める。
+# 数字はこの限りでない (全角に写すので規格どおり正立になる)。
+STAGE1_UPRIGHT_ASCII = True
 
-    with_nudge=False は「寄せを一切しない」状態で、見本の比較用。
+
+def vertical_form(ch, map_digits=True):
+    """(実際に描く字, UTR #50 の値) を返す。"""
+    if map_digits and ch in FULLWIDTH_DIGITS:
+        return FULLWIDTH_DIGITS[ch], 'U'
+    v = vo(ch)
+    if STAGE1_UPRIGHT_ASCII and v == 'R' and ' ' <= ch <= '~':
+        return ch, 'U'
+    return ch, v
+
+
+def corner_offset(g, asc, cell, margin):
+    """墨をマスの右上の角に寄せる dx, dy を返す。
+
+    em 比ではなく、グリフの墨の箱から直接求める。フォントが変わっても
+    余白が変わらない。利用者がフォントを作れる以上 (仕様書 3.6)、
+    比で持つと端末ごとに寄り方が変わってしまう。
     """
-    if ch in ROTATE:
-        return True, 0.0, 0.0
-    if with_nudge and ch in NUDGE_TOP_RIGHT:
-        return False, *NUDGE_TOP_RIGHT[ch]
-    if with_nudge and ch in SMALL_KANA:
-        return False, *SMALL_KANA_NUDGE
-    return False, 0.0, 0.0
+    ink_x0 = g['left']
+    ink_y0 = asc - g['top']
+    want_x0 = cell - margin - g['width']
+    want_y0 = margin
+    return want_x0 - ink_x0, want_y0 - ink_y0
+
 
 
 # --- 描画 (GfxRenderer.cpp:379 の写し) ---------------------------------------
@@ -147,20 +176,76 @@ def draw_h(page, fnt, asc, x, y, text):
     return pen
 
 
-def draw_cell(page, fnt, asc, cell_left, cell_top, cell, ch, with_nudge=True):
-    """1 マスに 1 文字。cell_left/cell_top はマスの左上。"""
+def font_dot(fnt):
+    """フォント自身の点を 1 つ取り出す。U+2026 の左端の点。
+
+    自前で丸を描くと書体と合わない。字の中の点をそのまま使えば、
+    利用者がどのフォントを入れても点の大きさと形が本文と揃う。
+    """
+    g, grid = fnt.pixels(0x2026)
+    cols = [x for x in range(g['width']) if any(grid[y][x] < 3 for y in range(g['height']))]
+    runs = []
+    for x in cols:
+        if runs and x == runs[-1][-1] + 1:
+            runs[-1].append(x)
+        else:
+            runs.append([x])
+    first = runs[0]
+    dot = [[grid[y][x] for x in first] for y in range(g['height'])]
+    return dot, len(first), g['height']
+
+
+def stamp(page, dot, x, y):
+    for gy, row in enumerate(dot):
+        for gx, v in enumerate(row):
+            if v < 3 and 0 <= y + gy < SCREEN_H and 0 <= x + gx < SCREEN_W:
+                page[y + gy][x + gx] = INK
+
+
+# 三点リーダ・二点リーダは自前で点を描く。
+# このフォントの U+2026 は半角 12.5 px の欧文用グリフで、回転しても
+# マスの高さに足りない。本来の縦書き字形は全角で点がマスいっぱいに広がる。
+# 自前で描くのは、フォントが持っていない縦書き字形を代わりに作ることであり、
+# UTR #50 の Tr / R のフォールバックより規格の意図に近い。
+LEADER_DOTS = {'…': 3, '‥': 2}
+
+
+def draw_leader(page, fnt, cell_left, cell_top, cell, count):
+    """マスの高さに点を count 個、均等に置く。
+
+    2 マス並べば 2*count 個が等間隔で連続する。
+    点はフォント自身の U+2026 から切り出すので書体と揃う。
+    """
+    dot, dw, dh = font_dot(fnt)
+    step = cell / float(count)
+    for k in range(count):
+        cy = cell_top + int(step * (k + 0.5)) - dh // 2
+        stamp(page, dot, cell_left + (cell - dw) // 2, cy)
+
+
+def draw_cell(page, fnt, asc, cell_left, cell_top, cell, ch,
+              with_nudge=True, map_digits=True):
+    """1 マスに 1 文字。UTR #50 の値で経路を決める。"""
+    ch, v = vertical_form(ch, map_digits)
+    if ch in LEADER_DOTS:
+        draw_leader(page, fnt, cell_left, cell_top, cell, LEADER_DOTS[ch])
+        return
     g, grid = fnt.pixels(ord(ch))
     if g is None:
         return
-    rot, dxr, dyr = rule(ch, with_nudge)
-    dx, dy = round(cell * dxr), round(cell * dyr)
-    if rot:
-        # Rotated90CW: screenX = cx + ascender - top + glyphY
-        #              screenY = cy - left - glyphX
-        # マスの左上を基準に、字がマスに収まるよう cx/cy を選ぶ。
-        blit(page, grid, g, asc, cell_left + dx, cell_top + cell + dy, True)
+    if v in ('R', 'Tr'):
+        blit_vertical_rot(page, grid, g, asc, cell_left, cell_top, cell)
+        return
+    dx = dy = 0
+    if v == 'Tu' and with_nudge:
+        dx, dy = corner_offset(g, asc, cell, CORNER_MARGIN)
     else:
-        blit(page, grid, g, asc, cell_left + dx, cell_top + asc + dy, False)
+        # U: 半角は送りが半分なのでマスの中央に寄せる
+        adv = (g['advanceX'] + 8) >> 4
+        if adv < cell:
+            dx = (cell - adv) // 2
+    blit(page, grid, g, asc, cell_left + dx, cell_top + asc + dy, False)
+
 
 
 # --- PNG ---------------------------------------------------------------------
@@ -196,20 +281,6 @@ def write_zoom(path, page, x0, y0, w, h, n=6):
 
 # --- 確認用の 3 項目 ---------------------------------------------------------
 
-def corner_offset(g, asc, cell, margin):
-    """墨をマスの右上の角に寄せる dx, dy を返す。
-
-    em 比ではなく、グリフの墨の箱から直接求める。フォントが変わっても
-    余白が変わらない。利用者がフォントを作れる以上 (仕様書 3.6)、
-    比で持つと端末ごとに寄り方が変わってしまう。
-    """
-    ink_x0 = g['left']
-    ink_y0 = asc - g['top']
-    want_x0 = cell - margin - g['width']
-    want_y0 = margin
-    return want_x0 - ink_x0, want_y0 - ink_y0
-
-
 def ink_box(g, asc, dx, dy):
     """マス座標での墨の (x0, y0, x1, y1)。"""
     x0 = g['left'] + dx
@@ -224,32 +295,6 @@ def cell_frame(page, x, y, cell, step=3):
             page[y][x + k] = INK
         if y + cell - 1 < SCREEN_H:
             page[y + cell - 1][x + k] = INK
-
-
-def font_dot(fnt):
-    """フォント自身の点を 1 つ取り出す。U+2026 の左端の点。
-
-    自前で丸を描くと書体と合わない。字の中の点をそのまま使えば、
-    利用者がどのフォントを入れても点の大きさと形が本文と揃う。
-    """
-    g, grid = fnt.pixels(0x2026)
-    cols = [x for x in range(g['width']) if any(grid[y][x] < 3 for y in range(g['height']))]
-    runs = []
-    for x in cols:
-        if runs and x == runs[-1][-1] + 1:
-            runs[-1].append(x)
-        else:
-            runs.append([x])
-    first = runs[0]
-    dot = [[grid[y][x] for x in first] for y in range(g['height'])]
-    return dot, len(first), g['height']
-
-
-def stamp(page, dot, x, y):
-    for gy, row in enumerate(dot):
-        for gx, v in enumerate(row):
-            if v < 3 and 0 <= y + gy < SCREEN_H and 0 <= x + gx < SCREEN_W:
-                page[y + gy][x + gx] = INK
 
 
 # --- 確認1: 括弧の回転だけ ---------------------------------------------------
@@ -332,12 +377,11 @@ def diag_kuten(fnt, asc, cell, colw, out_dir, margin=2):
         for j, ch in enumerate(sample):
             y = top + j * cell
             g, grid = fnt.pixels(ord(ch))
-            if ch in NUDGE_TOP_RIGHT:
+            if vo(ch) == 'Tu':
                 if i:
                     dx, dy = corner_offset(g, asc, cell, margin)
                 else:
-                    dx = round(cell * NUDGE_TOP_RIGHT[ch][0])
-                    dy = round(cell * NUDGE_TOP_RIGHT[ch][1])
+                    dx, dy = round(cell * 0.5), round(cell * -0.5)   # 旧: em 比
                 if j < 4:
                     report.append((ch, 'corner' if i else 'ratio', dx, dy,
                                    ink_box(g, asc, dx, dy), g))
@@ -356,10 +400,33 @@ def diag_kuten(fnt, asc, cell, colw, out_dir, margin=2):
               % (ch, mode, '%+d, %+d' % (dx, dy), x0, y0, x1, y1, '', cell - 1 - x1, y0))
 
 
+def diag_digits(fnt, asc, cell, colw, out_dir):
+    """半角数字を全角に写した版と、写さない版。"""
+    page = blank()
+    draw_h(page, fnt, asc, MARGIN_L, 8, '確認4 数字と英字')
+    draw_h(page, fnt, asc, MARGIN_L, 8 + asc + 4, '右 = 写さない / 左 = 0-9 を全角に写す')
+    top = 8 + (asc + 4) * 2 + 8
+    sample = '第3章1980年ABC'
+    for i, mapd in enumerate([False, True]):
+        x = SCREEN_W - MARGIN_R - (i + 1) * colw
+        draw_h(page, fnt, asc, x, top - asc - 4, 'mapped' if mapd else 'raw')
+        for j, ch in enumerate(sample):
+            y = top + j * cell
+            if y + cell > SCREEN_H - MARGIN_B:
+                break
+            draw_cell(page, fnt, asc, x, y, cell, ch, map_digits=mapd)
+            cell_frame(page, x, y, cell)
+    write_png(out_dir / 'c4_digits.png', page)
+    write_zoom(out_dir / 'c4_digits_zoom.png', page,
+               SCREEN_W - MARGIN_R - colw * 2 - 4, top - 4,
+               colw * 2 + 8, cell * len(sample) + 8, n=6)
+
+
 def diag(fnt, asc, em, cell, colw, out_dir):
     diag_brackets(fnt, asc, cell, colw, out_dir)
     diag_ellipsis(fnt, asc, cell, colw, out_dir)
     diag_kuten(fnt, asc, cell, colw, out_dir)
+    diag_digits(fnt, asc, cell, colw, out_dir)
 
 
 
