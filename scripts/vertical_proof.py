@@ -316,8 +316,10 @@ def diag_brackets(fnt, asc, cell, colw, out_dir):
         if y + cell > SCREEN_H - MARGIN_B:
             break
         draw_h(page, fnt, asc, label_x, y, ch)            # 元の形 (横書きのまま)
-        draw_cell(page, fnt, asc, col_fw, y, cell, ch)    # ファームの回転
         g, grid = fnt.pixels(ord(ch))
+        # fw 列はファームの Rotated90CW をそのまま呼ぶ。
+        # draw_cell() は規格駆動で補正版を使うので、ここでは使えない。
+        blit(page, grid, g, asc, col_fw, y + cell, True)
         blit_vertical_rot(page, grid, g, asc, col_ok, y, cell)  # 正しい向き
         cell_frame(page, col_fw, y, cell)
         cell_frame(page, col_ok, y, cell)

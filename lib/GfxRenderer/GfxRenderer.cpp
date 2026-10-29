@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "FontCacheManager.h"
+#include "VerticalOrientation.h"
 
 namespace {
 
@@ -298,7 +299,24 @@ static AlignedMemRect screenRectToAlignedMemRect(GfxRenderer::Orientation orient
   return out;
 }
 
-enum class TextRotation { None, Rotated90CW };
+enum class TextRotation {
+  None,
+  /// Glyph top -> screen left, glyph left -> screen down.
+  ///
+  /// Despite the name this is a counter-clockwise turn, and drawTextRotated90CW()
+  /// advances the pen upwards, so a string set with it reads bottom to top. Its
+  /// only user is the on-screen keyboard's side-button hints, where the labels
+  /// are the single characters ">" and "<" and come out as arrows pointing up and
+  /// down — which is what those buttons do. Correct where it is used; do not
+  /// change it. See docs-jp spec section 9.2-9.
+  Rotated90CW,
+  /// Glyph top -> screen right, glyph left -> screen up.
+  ///
+  /// A true clockwise turn, which is what UTR #50 means by R and Tr. Used only by
+  /// drawTextVertical() for punctuation that has to lie on its side in a vertical
+  /// column. Keeping it separate leaves Rotated90CW's output untouched.
+  VerticalCW,
+};
 
 // Shared glyph rendering logic for normal and rotated text.
 // Coordinate mapping and cursor advance direction are selected at compile time via the template parameter.
@@ -402,6 +420,12 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
     if (!renderer.glyphIntersectsStrip(ob, ib - (width - 1), ob + height - 1, ib)) {
       return;
     }
+  } else if constexpr (rotation == TextRotation::VerticalCW) {
+    // cursorX/cursorY are the top-left of the rotated glyph's box: the caller has
+    // already resolved where in the cell it belongs (see drawTextVertical).
+    if (!renderer.glyphIntersectsStrip(cursorX, cursorY, cursorX + height - 1, cursorY + width - 1)) {
+      return;
+    }
   } else {
     const int gx0 = cursorX + left;
     const int gy0 = cursorY - top;
@@ -416,9 +440,15 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
     // For Normal:  outer loop advances screenY, inner loop advances screenX
     // For Rotated: outer loop advances screenX, inner loop advances screenY (in reverse)
     int outerBase, innerBase;
+    // VerticalCW walks the outer axis backwards, which is what makes it the
+    // opposite turn from Rotated90CW.
+    constexpr int outerStep = (rotation == TextRotation::VerticalCW) ? -1 : 1;
     if constexpr (rotation == TextRotation::Rotated90CW) {
       outerBase = cursorX + fontData->ascender - top;  // screenX = outerBase + glyphY
       innerBase = cursorY - left;                      // screenY = innerBase - glyphX
+    } else if constexpr (rotation == TextRotation::VerticalCW) {
+      outerBase = cursorX + height - 1;  // screenX = outerBase - glyphY
+      innerBase = cursorY;               // screenY = innerBase + glyphX
     } else {
       outerBase = cursorY - top;   // screenY = outerBase + glyphY
       innerBase = cursorX + left;  // screenX = innerBase + glyphX
@@ -427,12 +457,15 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
     if (is2Bit) {
       int pixelPosition = 0;
       for (int glyphY = 0; glyphY < height; glyphY++) {
-        const int outerCoord = outerBase + glyphY;
+        const int outerCoord = outerBase + outerStep * glyphY;
         for (int glyphX = 0; glyphX < width; glyphX++, pixelPosition++) {
           int screenX, screenY;
           if constexpr (rotation == TextRotation::Rotated90CW) {
             screenX = outerCoord;
             screenY = innerBase - glyphX;
+          } else if constexpr (rotation == TextRotation::VerticalCW) {
+            screenX = outerCoord;
+            screenY = innerBase + glyphX;
           } else {
             screenX = innerBase + glyphX;
             screenY = outerCoord;
@@ -462,12 +495,15 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
     } else {
       int pixelPosition = 0;
       for (int glyphY = 0; glyphY < height; glyphY++) {
-        const int outerCoord = outerBase + glyphY;
+        const int outerCoord = outerBase + outerStep * glyphY;
         for (int glyphX = 0; glyphX < width; glyphX++, pixelPosition++) {
           int screenX, screenY;
           if constexpr (rotation == TextRotation::Rotated90CW) {
             screenX = outerCoord;
             screenY = innerBase - glyphX;
+          } else if constexpr (rotation == TextRotation::VerticalCW) {
+            screenX = outerCoord;
+            screenY = innerBase + glyphX;
           } else {
             screenX = innerBase + glyphX;
             screenY = outerCoord;
@@ -2179,6 +2215,194 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
 
     renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, x, lastBaseY, black, style);
     prevCp = cp;
+  }
+}
+
+// --- Vertical writing (F-5 stage 1) -----------------------------------------
+//
+// One codepoint occupies one square cell, so a column holds
+// viewportHeight / cellSize characters and nothing has to be measured to find
+// out. Full-width glyphs are exactly one em wide, which is what makes that
+// true; half-width ones are centred in their cell rather than given half of it.
+//
+// Which characters lie on their side comes from UTR #50 (VerticalOrientation.h,
+// generated from the standard). Writing that table by hand missed thirty
+// characters, including the double angle brackets Aozora uses for every ruby.
+
+namespace {
+
+/// Full-width digits are Upright in UTR #50 where half-width ones are Rotated,
+/// and a printed page sets them upright in their own cell, so map before
+/// drawing. Fonts that lack them fall back to the half-width glyph, centred.
+constexpr uint32_t toFullWidthDigit(const uint32_t cp) { return (cp >= '0' && cp <= '9') ? (0xFF10 + (cp - '0')) : cp; }
+
+/// ASCII letters and symbols stay upright in stage 1 even though UTR #50 turns
+/// them. Turning them one at a time stands each letter on its own end, which is
+/// not what a printed page does — there a whole Latin word turns together and
+/// reads along the column. Doing that needs run detection, which is stage 2.
+constexpr bool isStage1UprightAscii(const uint32_t cp) { return cp >= 0x20 && cp <= 0x7E; }
+
+}  // namespace
+
+int GfxRenderer::getFullWidthAdvance(const int fontId, const EpdFontFamily::Style style) const {
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", fontId);
+    return 0;
+  }
+  // U+4E00 is the first CJK ideograph; every one of them is a full em wide.
+  const EpdGlyph* glyph = fontIt->second.getGlyph(0x4E00, style);
+  if (glyph == nullptr) {
+    // No CJK in this font: fall back to the line advance, which is the closest
+    // thing to an em it can offer.
+    return getLineHeight(fontId);
+  }
+  return fp4::toPixel(glyph->advanceX);
+}
+
+void GfxRenderer::drawLeaderDots(const EpdFontFamily& font, const int cellLeft, const int cellTop, const int cellSize,
+                                 const int count, const bool black, const EpdFontFamily::Style style) const {
+  // The ellipsis in a text font is a half-width Latin glyph: turned on its side
+  // it covers half the cell and leaves a gap, where a real vertical form fills
+  // it. Drawing the dots is therefore closer to what UTR #50 is asking for than
+  // its own fallback is. The dot is cut from the font's own ellipsis so it
+  // matches whatever face the reader installed.
+  const EpdGlyph* glyph = font.getGlyph(0x2026, style);
+  const EpdFontData* fontData = font.getData(style);
+  if (glyph == nullptr || fontData == nullptr || glyph->width == 0) return;
+  const uint8_t* bitmap = getGlyphBitmap(fontData, glyph);
+  if (bitmap == nullptr) return;
+
+  // Width of the leftmost dot: scan columns until one is blank.
+  const int gw = glyph->width;
+  const int gh = glyph->height;
+  auto inkAt = [&](const int gx, const int gy) {
+    const int pos = gy * gw + gx;
+    if (fontData->is2Bit) {
+      return (3 - ((bitmap[pos >> 2] >> ((3 - (pos & 3)) * 2)) & 0x3)) < 3;
+    }
+    return ((bitmap[pos >> 3] >> (7 - (pos & 7))) & 1) != 0;
+  };
+  int x0 = 0;
+  while (x0 < gw) {
+    bool any = false;
+    for (int gy = 0; gy < gh && !any; gy++) any = inkAt(x0, gy);
+    if (any) break;
+    x0++;
+  }
+  int x1 = x0;
+  while (x1 < gw) {
+    bool any = false;
+    for (int gy = 0; gy < gh && !any; gy++) any = inkAt(x1, gy);
+    if (!any) break;
+    x1++;
+  }
+  const int dotW = x1 - x0;
+  if (dotW <= 0) return;
+
+  const int left = cellLeft + (cellSize - dotW) / 2;
+  for (int k = 0; k < count; k++) {
+    // Spaced a cellSize/count apart, so two cells of ellipsis run on without a
+    // seam, which is how a doubled ellipsis is set.
+    const int top = cellTop + (cellSize * (2 * k + 1)) / (2 * count) - gh / 2;
+    for (int gy = 0; gy < gh; gy++) {
+      for (int gx = x0; gx < x1; gx++) {
+        if (inkAt(gx, gy)) drawPixel(left + (gx - x0), top + gy, black);
+      }
+    }
+  }
+}
+
+void GfxRenderer::drawTextVertical(const int fontId, const int x, const int y, const int cellSize, const char* text,
+                                   const bool black, const EpdFontFamily::Style style) const {
+  if (text == nullptr || *text == '\0' || cellSize <= 0) {
+    return;
+  }
+
+  // Resolved once for the whole column, as everywhere else: the id depends on
+  // the string's content, so asking per character would let the face change
+  // partway down.
+  const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return;
+  }
+  const auto& font = fontIt->second;
+  const EpdFontData* fontData = font.getData(style);
+  if (fontData == nullptr) {
+    return;
+  }
+  const int ascender = fontData->ascender;
+
+  int cellTop = y;
+  const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+  while (*p != '\0') {
+    const uint32_t cp = utf8NextCodepoint(&p);
+    if (cp == 0) break;
+
+    if (cp == 0x2026 || cp == 0x2025) {
+      drawLeaderDots(font, x, cellTop, cellSize, cp == 0x2026 ? 3 : 2, black, style);
+      cellTop += cellSize;
+      continue;
+    }
+
+    uint32_t drawCp = cp;
+    vo::Orientation orientation = vo::lookup(cp);
+    if (cp >= '0' && cp <= '9') {
+      const uint32_t full = toFullWidthDigit(cp);
+      if (font.getGlyph(full, style) != nullptr) {
+        drawCp = full;
+        orientation = vo::Orientation::Upright;
+      } else {
+        orientation = vo::Orientation::Upright;  // centred half-width fallback
+      }
+    } else if (isStage1UprightAscii(cp) && orientation == vo::Orientation::Rotated) {
+      orientation = vo::Orientation::Upright;
+    }
+
+    const EpdGlyph* glyph = font.getGlyph(drawCp, style);
+    if (glyph == nullptr) {
+      cellTop += cellSize;
+      continue;
+    }
+
+    switch (orientation) {
+      case vo::Orientation::Rotated:
+      case vo::Orientation::TransformR: {
+        // The turn swaps which bearing decides which edge: a glyph whose ink
+        // hugs the right of its em box rides to the top of the cell, and one
+        // that hugs the left rides to the bottom. That is exactly where an
+        // opening and a closing bracket belong, so the metrics place them.
+        const int inkTop = ascender - glyph->top;
+        const int bx = x + std::max(0, cellSize - inkTop - glyph->height);
+        const int by = cellTop + std::max(0, cellSize - glyph->left - glyph->width);
+        renderCharImpl<TextRotation::VerticalCW>(*this, renderMode, font, drawCp, bx, by, black, style);
+        break;
+      }
+      case vo::Orientation::TransformU: {
+        // No vertical form in the font, so stand in for one by pushing the ink
+        // into the cell's top-right corner, which is where a printed page puts
+        // a comma, a full stop and a small kana. Computed from the glyph's own
+        // box rather than as a fraction of the em, so the margin holds under a
+        // font we have never seen — and every reader can install their own.
+        const int dx = (cellSize - VERTICAL_CORNER_MARGIN - glyph->width) - glyph->left;
+        const int dy = VERTICAL_CORNER_MARGIN - (ascender - glyph->top);
+        renderCharImpl<TextRotation::None>(*this, renderMode, font, drawCp, x + dx, cellTop + ascender + dy, black,
+                                           style);
+        break;
+      }
+      case vo::Orientation::Upright:
+      default: {
+        // Half-width glyphs still get a whole cell; centre them in it rather
+        // than letting them sit against its left edge.
+        const int advance = fp4::toPixel(glyph->advanceX);
+        const int dx = (advance < cellSize) ? (cellSize - advance) / 2 : 0;
+        renderCharImpl<TextRotation::None>(*this, renderMode, font, drawCp, x + dx, cellTop + ascender, black, style);
+        break;
+      }
+    }
+    cellTop += cellSize;
   }
 }
 

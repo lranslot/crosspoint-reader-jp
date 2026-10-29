@@ -92,6 +92,17 @@ class GfxRenderer {
 
   void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, int* y, bool pixelState,
                   EpdFontFamily::Style style) const;
+
+  /// Gap left between a corner-aligned glyph's ink and the cell's top and right
+  /// edges, in pixels. Two reads as touching the corner without crowding it at
+  /// any of the point sizes a reader can install.
+  static constexpr int VERTICAL_CORNER_MARGIN = 2;
+
+  /// Draws \p count dots down one cell, evenly spaced, for the ellipsis and the
+  /// two-dot leader. The dot is cut from the font's own U+2026 so it matches the
+  /// installed face.
+  void drawLeaderDots(const EpdFontFamily& font, int cellLeft, int cellTop, int cellSize, int count, bool black,
+                      EpdFontFamily::Style style) const;
   void freeBwBufferChunks();
   template <Color color>
   void drawPixelDither(int x, int y) const;
@@ -321,6 +332,31 @@ class GfxRenderer {
   // Helper for drawing rotated text (90 degrees clockwise, for side buttons)
   void drawTextRotated90CW(int fontId, int x, int y, const char* text, bool black = true,
                            EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+
+  /// Advance of a full-width glyph, in pixels. This is the cell size for
+  /// vertical writing: one codepoint occupies one square cell, so a column
+  /// holds viewportHeight / this many characters and nothing has to be measured
+  /// to find out.
+  ///
+  /// Falls back to the line advance for a font with no CJK in it.
+  int getFullWidthAdvance(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+
+  /// Draws \p text as one vertical column, top to bottom, one codepoint per cell.
+  ///
+  /// (x, y) is the top-left of the first cell. Pass getFullWidthAdvance()'s
+  /// result as \p cellSize: the caller needs it to decide how many characters
+  /// fit, and handing the same value back keeps the count and the drawing from
+  /// disagreeing by a cell.
+  ///
+  /// Which characters lie on their side, and which stand upright with their ink
+  /// pushed into a corner, comes from UTR #50 (VerticalOrientation.h). Callers
+  /// do not need to know anything about Japanese punctuation.
+  ///
+  /// A whole column at a time rather than a character at a time, so the font is
+  /// resolved once for the string — resolveTextFontId() is per-string by
+  /// design, and asking per character would let the face change partway down.
+  void drawTextVertical(int fontId, int x, int y, int cellSize, const char* text, bool black = true,
+                        EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   int getTextHeight(int fontId) const;
 
   // Grayscale functions

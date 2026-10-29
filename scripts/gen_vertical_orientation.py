@@ -167,6 +167,72 @@ def main():
         print('%s  %d 字' % (dest, len(rows)))
         return 0
 
+    if '--emit-cpp' in sys.argv:
+        tbl = {}
+        exec(compile(open(pathlib.Path(__file__).resolve().parent
+                          / 'vertical_orientation_table.py', encoding='utf-8').read(),
+                     'tbl', 'exec'), tbl)
+        rows = sorted((ord(ch), v) for ch, v in tbl['VERTICAL_ORIENTATION'].items())
+        out = [
+            '#pragma once',
+            '',
+            '// UTR #50 Vertical_Orientation の抜粋。**自動生成。手で編集しない。**',
+            '//',
+            '// 生成: python scripts/gen_vertical_orientation.py <VerticalOrientation.txt> --emit-cpp',
+            '// 取得: curl -o VerticalOrientation.txt',
+            '//       https://www.unicode.org/Public/UCD/latest/ucd/VerticalOrientation.txt',
+            '//',
+            '// 既定は U (正立) なので、U の符号位置はこの表に載せない。',
+            '// 手で列挙していたときは 30 字抜けていた (《》を含む)。',
+            '',
+            '#include <cstdint>',
+            '',
+            'namespace vo {',
+            '',
+            '/// 縦書きでの字の向き (UTR #50)。',
+            'enum class Orientation : uint8_t {',
+            '  Upright,   ///< U  コード表と同じ向き',
+            '  Rotated,   ///< R  時計回りに 90 度',
+            '  TransformU,///< Tu 縦書き字形の代用。回転しない (墨を升目の角へ)',
+            '  TransformR,///< Tr 縦書き字形の代用。時計回りに 90 度',
+            '};',
+            '',
+            'struct Entry {',
+            '  uint16_t cp;',
+            '  Orientation value;',
+            '};',
+            '',
+            '// 符号位置で昇順。二分探索する。',
+            'inline constexpr Entry TABLE[] = {',
+        ]
+        name = {'R': 'Rotated', 'Tu': 'TransformU', 'Tr': 'TransformR'}
+        for cp, v in rows:
+            out.append('    {0x%04X, Orientation::%s},' % (cp, name[v]))
+        out += [
+            '};',
+            'inline constexpr int TABLE_SIZE = %d;' % len(rows),
+            '',
+            '/// 既定は Upright。表に無い符号位置はすべて正立。',
+            'inline Orientation lookup(uint32_t cp) {',
+            '  if (cp > 0xFFFF) return Orientation::Upright;',
+            '  int lo = 0, hi = TABLE_SIZE - 1;',
+            '  while (lo <= hi) {',
+            '    const int mid = (lo + hi) / 2;',
+            '    if (TABLE[mid].cp == cp) return TABLE[mid].value;',
+            '    if (TABLE[mid].cp < cp) lo = mid + 1;',
+            '    else hi = mid - 1;',
+            '  }',
+            '  return Orientation::Upright;',
+            '}',
+            '',
+            '}  // namespace vo',
+            '',
+        ]
+        dest = pathlib.Path(__file__).resolve().parent.parent / 'lib' / 'GfxRenderer' / 'VerticalOrientation.h'
+        dest.write_text('\n'.join(out), encoding='utf-8', newline='\n')
+        print('%s  %d 字' % (dest, len(rows)))
+        return 0
+
     # 既定: 範囲ごとの内訳
     print('%-18s %-7s %-7s %-7s %-7s %-7s' % ('範囲', 'U', 'R', 'Tu', 'Tr', '計'))
     for lo, hi, name in RANGES:
