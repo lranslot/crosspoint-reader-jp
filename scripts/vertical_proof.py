@@ -66,7 +66,25 @@ NOT_THE_DEVICE = """\
 #
 # 表は scripts/vertical_orientation_table.py (規格から自動生成)。
 # 手で列挙していたときは 30 字抜けていた。
-CORNER_MARGIN = 2          # Tu をマスの角から何 px 離すか
+CORNER_MARGIN = 2          # 、。 をマスの角から何 px 離すか
+
+# フォントの昇り箱 (ascender - descender) は行送りの指標で、行間が入っている。
+# 14 pt では 43 px あるが、組版の em —— 全角字の送りであり、縦書きのマスそのもの
+# —— は 29 px しかない。**縦組みの配置はすべて em の箱で測らなければならない。**
+#
+# em の箱の昇りは em の 88% (表意文字の em 四角の通例)。入っているフォントの
+# 6 サイズすべてで検算した: 本 と 戦 が [emTop, emTop+cell] をちょうど埋め、
+# 「 は上端に、」 は下端に接し、ー は中央に来る。
+EM_ASCENT_PERCENT = 88
+
+# 小書きかなをマスの中央から右へ寄せる量 (em 比)。
+# 参考画像の実測: ャ ぉ ぇ ィ の 4 字で 1〜2.5 px / em 20 px = 約 0.095 em。
+SMALL_KANA_NUDGE_PERCENT = 10
+
+# 中央から動かさない Tu。縦書き字形が無いだけで、寄せる字ではない。
+TU_UPRIGHT = set('！？゛゜')
+# マスの右上の角に寄せる Tu。
+TU_CORNER = set('、。，．')
 
 # 半角数字を全角数字に写す。
 # UTR #50 では半角 0-9 は R (横倒し)、全角 ０-９ は U (正立)。
@@ -94,8 +112,14 @@ def vertical_form(ch, map_digits=True):
     return ch, v
 
 
+def em_metrics(asc, cell):
+    """(em の昇り, 昇り箱の中での em の箱の上端) を返す。"""
+    em_asc = cell * EM_ASCENT_PERCENT // 100
+    return em_asc, asc - em_asc
+
+
 def corner_offset(g, asc, cell, margin):
-    """墨をマスの右上の角に寄せる dx, dy を返す。
+    """、。 の墨をマスの右上の角に寄せる dx, dy を返す。
 
     em 比ではなく、グリフの墨の箱から直接求める。フォントが変わっても
     余白が変わらない。利用者がフォントを作れる以上 (仕様書 3.6)、
@@ -106,6 +130,20 @@ def corner_offset(g, asc, cell, margin):
     want_x0 = cell - margin - g['width']
     want_y0 = margin
     return want_x0 - ink_x0, want_y0 - ink_y0
+
+
+def small_kana_offset(g, asc, cell):
+    """小書きかなの dx, dy を返す。**角には寄せない。**
+
+    参考画像の実測では、小書きかなは升目の**上下中央**にあり、横だけ右へ
+    わずかに寄っている (ャ ぉ ぇ で上下の余白が等しい)。句読点と同じ経路で
+    角に貼り付けると前の字に触れて見える —— 実機で指摘された症状がこれ。
+    """
+    em_asc, em_top = em_metrics(asc, cell)
+    nudge = cell * SMALL_KANA_NUDGE_PERCENT // 100
+    want_x0 = (cell - g['width']) // 2 + nudge
+    want_y0 = (cell - g['height']) // 2
+    return want_x0 - g['left'], want_y0 - (asc - g['top'])
 
 
 
@@ -145,16 +183,23 @@ def blit_vertical_rot(page, grid, g, asc, cell_left, cell_top, cell):
     縦組みの約物は「左 → 上」でなければならず、14 字すべてが 180 度ずれる。
     ここでは正しい向きを描く。ファーム側には新しい回転が要る。
 
-      screenX = cell_left + (cell - inkTop - h) + (h - 1 - gy)
-      screenY = cell_top  + (cell - left  - w) + gx
+      screenX = cell_left + (cell - fromEmTop - h) + (h - 1 - gy)
+      screenY = cell_top  + left + gx
 
-    上端の余白が左端の余白に、左端の余白が上端の余白になる — つまり
-    「縦の位置」と「横の位置」が入れ替わる。これにより 「 は上、」 は下へ行く。
+    時計回りでは **グリフの上端がマスの右端へ、グリフの左端がマスの上端へ**
+    行く。だから横の位置は「em の箱の上端から墨まで」、縦の位置は「左の
+    サイドベアリング」そのものになる。
+
+    ⚠️ 縦の位置に右のサイドベアリング (cell - left - w) を使うと反時計回りに
+    なり、「 と 」 が上下逆に出る。実機で出ていた症状がこれ。
+    ⚠️ 横の位置を昇り箱で測ると、箱 (43) とマス (29) の差だけ左へ寄る。
+    ー が左に寄っていたのがこれ。em の箱で測ること。
     """
     w, h = g['width'], g['height']
-    ink_top = asc - g['top']
-    bx = cell_left + max(0, cell - ink_top - h)
-    by = cell_top + max(0, cell - g['left'] - w)
+    _, em_top = em_metrics(asc, cell)
+    from_em_top = max(0, (asc - g['top']) - em_top)
+    bx = cell_left + min(max(0, cell - from_em_top - h), max(0, cell - h))
+    by = cell_top + min(g['left'], max(0, cell - w))
     for gy in range(h):
         for gx in range(w):
             if grid[gy][gx] >= 3:
@@ -236,14 +281,19 @@ def draw_cell(page, fnt, asc, cell_left, cell_top, cell, ch,
     if v in ('R', 'Tr'):
         blit_vertical_rot(page, grid, g, asc, cell_left, cell_top, cell)
         return
+    em_asc, _ = em_metrics(asc, cell)
     dx = dy = 0
-    if v == 'Tu' and with_nudge:
+    if v == 'Tu' and with_nudge and ch in TU_CORNER:
         dx, dy = corner_offset(g, asc, cell, CORNER_MARGIN)
+    elif v == 'Tu' and with_nudge and ch not in TU_UPRIGHT:
+        dx, dy = small_kana_offset(g, asc, cell)
     else:
         # U: 半角は送りが半分なのでマスの中央に寄せる
         adv = (g['advanceX'] + 8) >> 4
         if adv < cell:
             dx = (cell - adv) // 2
+        # ベースラインは em の箱の昇り。昇り箱で置くと列全体が下へずれる。
+        dy = em_asc - asc
     blit(page, grid, g, asc, cell_left + dx, cell_top + asc + dy, False)
 
 

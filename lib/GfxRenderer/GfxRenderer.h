@@ -95,8 +95,29 @@ class GfxRenderer {
 
   /// Gap left between a corner-aligned glyph's ink and the cell's top and right
   /// edges, in pixels. Two reads as touching the corner without crowding it at
-  /// any of the point sizes a reader can install.
+  /// any of the point sizes a reader can install, and it is what a printed page
+  /// shows: the gap above a 、 measures 0.075 em, which rounds to 2 at every
+  /// size this font ships (docs-jp f5 section 17).
   static constexpr int VERTICAL_CORNER_MARGIN = 2;
+
+  /// The em box's ascent, as a percentage of the em.
+  ///
+  /// A font's ascender/descender box is a *line* metric with leading folded in:
+  /// at 14 pt it is 43 px tall where the typographic em — the advance of a
+  /// full-width glyph, which is exactly what a vertical cell is — is 29. Every
+  /// placement in a vertical column has to be measured in the em box, because
+  /// that is the box the cell represents.
+  ///
+  /// 88% is the usual ascent of an ideographic em square. Checked against all
+  /// six sizes of the font on the card: 本 and 戦 fill [emTop, emTop + cellSize]
+  /// to the pixel, 「 sits flush with its top, 」 with its bottom, and ー lands
+  /// dead centre — which is where a printed page puts each of them.
+  static constexpr int VERTICAL_EM_ASCENT_PERCENT = 88;
+
+  /// How far right of centre a small kana sits in its cell, as a percentage of
+  /// the em. Measured off 縦書き文庫 at ャ ぉ ぇ ィ: 1 to 2.5 px against a 20 px
+  /// em, so about a tenth.
+  static constexpr int VERTICAL_SMALL_KANA_NUDGE_PERCENT = 10;
 
   /// Draws \p count dots down one cell, evenly spaced, for the ellipsis and the
   /// two-dot leader. The dot is cut from the font's own U+2026 so it matches the
@@ -299,9 +320,8 @@ class GfxRenderer {
   /// order says nothing about the logical string the caller holds. Such lines fall
   /// back to prefix measurement and stay O(n^2); they are rare in plain text, and
   /// a wrong offset would be worse than a slow one.
-  size_t findWrapOffset(int fontId, const char* text, int maxWidth,
-                        EpdFontFamily::Style style = EpdFontFamily::REGULAR, bool preferSpace = true,
-                        int extraWidth = 0) const;
+  size_t findWrapOffset(int fontId, const char* text, int maxWidth, EpdFontFamily::Style style = EpdFontFamily::REGULAR,
+                        bool preferSpace = true, int extraWidth = 0) const;
   int getFontAscenderSize(int fontId) const;
   /// Ascender of the font \p text will actually be drawn with, which for a
   /// CJK-bearing string is the fallback font and not \p fontId (see drawText,

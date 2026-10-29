@@ -2242,6 +2242,21 @@ constexpr uint32_t toFullWidthDigit(const uint32_t cp) { return (cp >= '0' && cp
 /// reads along the column. Doing that needs run detection, which is stage 2.
 constexpr bool isStage1UprightAscii(const uint32_t cp) { return cp >= 0x20 && cp <= 0x7E; }
 
+/// The Tu characters that ride into the cell's top-right corner: the comma and
+/// the full stop, half-width and full-width. Everything else UTR #50 marks Tu is
+/// a small kana or a mark that simply stands upright, and neither belongs in a
+/// corner — see drawTextVertical().
+constexpr bool isVerticalCornerPunct(const uint32_t cp) {
+  return cp == 0x3001 || cp == 0x3002 || cp == 0xFF0C || cp == 0xFF0E;
+}
+
+/// The Tu characters that need no shift at all: ！ ？ and the standalone voicing
+/// marks. They are Tu only because a vertical face may draw them differently;
+/// the fallback is the upright glyph where an upright glyph goes.
+constexpr bool isVerticalUprightMark(const uint32_t cp) {
+  return cp == 0xFF01 || cp == 0xFF1F || cp == 0x309B || cp == 0x309C;
+}
+
 }  // namespace
 
 int GfxRenderer::getFullWidthAdvance(const int fontId, const EpdFontFamily::Style style) const {
@@ -2334,6 +2349,12 @@ void GfxRenderer::drawTextVertical(const int fontId, const int x, const int y, c
     return;
   }
   const int ascender = fontData->ascender;
+  // The em box the cell stands for, expressed in the font's own vertical frame:
+  // its top sits emTop below the ascender line, its baseline emAscent below the
+  // cell's top edge. Every placement below measures against this, not against
+  // the ascender box, which is half as tall again (see VERTICAL_EM_ASCENT_PERCENT).
+  const int emAscent = cellSize * VERTICAL_EM_ASCENT_PERCENT / 100;
+  const int emTop = ascender - emAscent;
 
   int cellTop = y;
   const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
@@ -2370,24 +2391,47 @@ void GfxRenderer::drawTextVertical(const int fontId, const int x, const int y, c
     switch (orientation) {
       case vo::Orientation::Rotated:
       case vo::Orientation::TransformR: {
-        // The turn swaps which bearing decides which edge: a glyph whose ink
-        // hugs the right of its em box rides to the top of the cell, and one
-        // that hugs the left rides to the bottom. That is exactly where an
-        // opening and a closing bracket belong, so the metrics place them.
-        const int inkTop = ascender - glyph->top;
-        const int bx = x + std::max(0, cellSize - inkTop - glyph->height);
-        const int by = cellTop + std::max(0, cellSize - glyph->left - glyph->width);
+        // Turning clockwise sends the glyph's top edge to the cell's right edge
+        // and its left edge to the cell's top. So the horizontal place comes
+        // from how far the ink sits below the em box's top, and the vertical
+        // place is the left side bearing itself — which is why an opening
+        // bracket lands at the bottom, hugging the character it opens, and a
+        // closing one at the top, hugging the character it closes.
+        //
+        // Using the right side bearing for `by` turns the glyph the other way
+        // and stands 「 and 」 on the wrong ends of their cells. Measuring the
+        // ink against the ascender line rather than the em box drags bars such
+        // as ー to the left by the difference between the two boxes.
+        const int fromEmTop = std::max(0, (ascender - glyph->top) - emTop);
+        const int bx = x + std::max(0, cellSize - fromEmTop - glyph->height);
+        const int leftBearing = std::max(0, static_cast<int>(glyph->left));
+        const int by = cellTop + std::min(leftBearing, std::max(0, cellSize - glyph->width));
         renderCharImpl<TextRotation::VerticalCW>(*this, renderMode, font, drawCp, bx, by, black, style);
         break;
       }
       case vo::Orientation::TransformU: {
-        // No vertical form in the font, so stand in for one by pushing the ink
-        // into the cell's top-right corner, which is where a printed page puts
-        // a comma, a full stop and a small kana. Computed from the glyph's own
-        // box rather than as a fraction of the em, so the margin holds under a
-        // font we have never seen — and every reader can install their own.
-        const int dx = (cellSize - VERTICAL_CORNER_MARGIN - glyph->width) - glyph->left;
-        const int dy = VERTICAL_CORNER_MARGIN - (ascender - glyph->top);
+        // The font has no vertical form, so stand in for one. What stands in
+        // depends on the character, and lumping them together is what made the
+        // small kana crowd the character above them on the device.
+        int dx;
+        int dy;
+        if (isVerticalCornerPunct(cp)) {
+          // A comma or full stop rides into the cell's top-right corner, which
+          // is where a printed page puts it. Taken from the glyph's own ink box
+          // rather than as a fraction of the em, so the margin holds under a
+          // font we have never seen — and every reader can install their own.
+          dx = (cellSize - VERTICAL_CORNER_MARGIN - glyph->width) - glyph->left;
+          dy = VERTICAL_CORNER_MARGIN - (ascender - glyph->top);
+        } else if (isVerticalUprightMark(cp)) {
+          dx = 0;
+          dy = emAscent - ascender;
+        } else {
+          // A small kana is not corner punctuation. On a printed page it sits
+          // centred in its cell and shifted slightly right — measured at ャ ぉ
+          // ぇ ィ, all four within a pixel of centred on the vertical axis.
+          dx = (cellSize - glyph->width) / 2 + cellSize * VERTICAL_SMALL_KANA_NUDGE_PERCENT / 100 - glyph->left;
+          dy = (cellSize - glyph->height) / 2 - (ascender - glyph->top);
+        }
         renderCharImpl<TextRotation::None>(*this, renderMode, font, drawCp, x + dx, cellTop + ascender + dy, black,
                                            style);
         break;
@@ -2395,10 +2439,13 @@ void GfxRenderer::drawTextVertical(const int fontId, const int x, const int y, c
       case vo::Orientation::Upright:
       default: {
         // Half-width glyphs still get a whole cell; centre them in it rather
-        // than letting them sit against its left edge.
+        // than letting them sit against its left edge. The baseline is the em
+        // box's, not the ascender box's: placing it at the ascender drops the
+        // whole column by the difference between the two and lets the last
+        // character of a column hang past the bottom margin.
         const int advance = fp4::toPixel(glyph->advanceX);
         const int dx = (advance < cellSize) ? (cellSize - advance) / 2 : 0;
-        renderCharImpl<TextRotation::None>(*this, renderMode, font, drawCp, x + dx, cellTop + ascender, black, style);
+        renderCharImpl<TextRotation::None>(*this, renderMode, font, drawCp, x + dx, cellTop + emAscent, black, style);
         break;
       }
     }
