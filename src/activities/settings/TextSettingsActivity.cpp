@@ -261,8 +261,9 @@ void TextSettingsActivity::render(RenderLock&&) {
 
     case Tab::Layout: {
       constexpr int LAYOUT_ROWS = static_cast<int>(LayoutRow::Count);
-      static constexpr StrId ROW_NAME_IDS[LAYOUT_ROWS] = {StrId::STR_LINE_SPACING, StrId::STR_EXTRA_SPACING,
-                                                          StrId::STR_ALIGNMENT, StrId::STR_SCREEN_MARGIN};
+      static constexpr StrId ROW_NAME_IDS[LAYOUT_ROWS] = {StrId::STR_VERTICAL_WRITING, StrId::STR_LINE_SPACING,
+                                                          StrId::STR_EXTRA_SPACING, StrId::STR_ALIGNMENT,
+                                                          StrId::STR_SCREEN_MARGIN};
       GUI.drawList(
           renderer, listRect, LAYOUT_ROWS, selectedItem,
           [](int index) { return std::string(I18N.get(ROW_NAME_IDS[index])); }, nullptr, nullptr,
@@ -270,7 +271,10 @@ void TextSettingsActivity::render(RenderLock&&) {
       if (onTabBar)
         confirmLabel = tr(STR_STYLE);
       else  // Extra Paragraph Spacing toggles; the rest open a picker
-        confirmLabel = (selectedItem == static_cast<int>(LayoutRow::ParaSpacing)) ? tr(STR_TOGGLE) : tr(STR_SELECT);
+        confirmLabel = (selectedItem == static_cast<int>(LayoutRow::ParaSpacing) ||
+                        selectedItem == static_cast<int>(LayoutRow::VerticalWriting))
+                           ? tr(STR_TOGGLE)
+                           : tr(STR_SELECT);
       break;
     }
 
@@ -380,6 +384,11 @@ void TextSettingsActivity::applySize(int listIndex) {
 
 void TextSettingsActivity::confirmLayoutRow(int row) {
   switch (static_cast<LayoutRow>(row)) {
+    case LayoutRow::VerticalWriting:
+      SETTINGS.verticalWriting = !SETTINGS.verticalWriting;
+      SETTINGS.saveToFile();
+      requestUpdate();
+      break;
     case LayoutRow::ParaSpacing:
       SETTINGS.extraParagraphSpacing = !SETTINGS.extraParagraphSpacing;
       SETTINGS.saveToFile();
@@ -421,6 +430,8 @@ void TextSettingsActivity::confirmLayoutRow(int row) {
 
 std::string TextSettingsActivity::layoutValueText(int row) const {
   switch (static_cast<LayoutRow>(row)) {
+    case LayoutRow::VerticalWriting:
+      return SETTINGS.verticalWriting ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     case LayoutRow::LineSpacing: {
       const uint8_t v = SETTINGS.lineSpacing;
       return v < std::size(LINE_SPACING_IDS) ? I18N.get(LINE_SPACING_IDS[v]) : I18N.get(StrId::STR_NORMAL);

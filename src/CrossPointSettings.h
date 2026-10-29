@@ -230,6 +230,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // available size (and persists the snap) whenever the family changes.
   uint8_t fontPointSize = DEFAULT_FONT_POINT_SIZE;
   uint8_t lineSpacing = NORMAL;
+
+  // Vertical writing for .txt. Off by default: this is a Japanese reading mode,
+  // and turning it on for everyone would be a surprise. .md ignores it entirely
+  // (see docs-jp spec section 6.3 on what .md is for), so the reader forces
+  // horizontal there rather than this flag carrying the exception.
+  uint8_t verticalWriting = 0;
   uint8_t paragraphAlignment = JUSTIFIED;
   // Auto-sleep timeout setting (default 10 minutes). Legacy sleepTimeout enum values are migration-only.
   uint8_t sleepTimeoutMinutes = 10;

@@ -62,6 +62,32 @@ class TxtReaderActivity final : public Activity {
   };
 
   bool isMarkdown = false;
+
+  // --- Vertical writing (.txt only) ---
+  // outLines keeps its meaning: one visual unit in reading order. Horizontally
+  // that is a line, vertically a column. Only the rule for where to break
+  // changes, and linesPerPage counts columns instead of lines.
+  //
+  // .md is always horizontal whatever the setting. It is a tool for checklists,
+  // not something to read, so typesetting features do not apply to it (spec
+  // section 6.3). Keeping the exception here rather than in the setting means
+  // the setting stays a plain yes/no.
+  bool isVertical = false;
+  int cellSize = 0;      // full-width advance; one codepoint occupies this square
+  int columnWidth = 0;   // cell plus the gap between columns
+  int charsPerUnit = 0;  // characters down one column; 0 when horizontal
+
+  // Column pitch as a percentage of the em, indexed by CrossPointSettings
+  // lineSpacing (TIGHT / NORMAL / WIDE). Tied to the em rather than to advanceY
+  // because advanceY/em is a property of whichever font the reader installed —
+  // measured at 1.14 and at 1.44 in the two halves of one family — and a column
+  // pitch that moves with the font is not a typesetting decision.
+  static constexpr int COLUMN_RATIO_PERCENT[] = {115, 130, 150};
+
+  // Advance `count` codepoints from `text`, stopping at `len`. Vertical writing
+  // breaks on a character count, not a measured width: every codepoint takes one
+  // cell, so there is nothing to measure.
+  static size_t advanceCodepoints(const char* text, size_t len, int count);
   int markerWidth = 0;  // gutter reserved for the checkbox, measured from "> "
   std::vector<CheckboxRef> pageCheckboxes;
   int selectedCheckbox = -1;
@@ -88,6 +114,7 @@ class TxtReaderActivity final : public Activity {
   int cachedOrientedMarginLeft = 0;
 
   void renderPage();
+  void renderPageVertical(int lineHeight);
   void renderStatusBar() const;
 
   void initializeReader();

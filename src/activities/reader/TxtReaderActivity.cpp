@@ -30,7 +30,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // algorithm, so any change to how lines are measured or broken must bump this or
 // stale pageOffsets are silently accepted.
 // v5: F-7 replaced the wrapping algorithm, which can move a break by one character.
-constexpr uint8_t CACHE_VERSION = 6;
+constexpr uint8_t CACHE_VERSION = 7;
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -270,10 +270,27 @@ void TxtReaderActivity::initializeReader() {
   const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
   const int lineHeight = renderer.getLineHeight(cachedFontId);
 
-  linesPerPage = viewportHeight / lineHeight;
+  isVertical = SETTINGS.verticalWriting != 0 && !isMarkdown;
+  if (isVertical) {
+    cellSize = renderer.getFullWidthAdvance(cachedFontId);
+    if (cellSize < 1) cellSize = lineHeight;
+    const size_t ratioIdx = (SETTINGS.lineSpacing < std::size(COLUMN_RATIO_PERCENT)) ? SETTINGS.lineSpacing : 1;
+    columnWidth = cellSize * COLUMN_RATIO_PERCENT[ratioIdx] / 100;
+    if (columnWidth < 1) columnWidth = 1;
+    // linesPerPage counts columns here. Reusing the field keeps the page index,
+    // the progress file and the status bar working without knowing which way
+    // the text runs.
+    linesPerPage = viewportWidth / columnWidth;
+    charsPerUnit = viewportHeight / cellSize;
+    if (charsPerUnit < 1) charsPerUnit = 1;
+  } else {
+    cellSize = columnWidth = charsPerUnit = 0;
+    linesPerPage = viewportHeight / lineHeight;
+  }
   if (linesPerPage < 1) linesPerPage = 1;
 
-  LOG_DBG("TRS", "Viewport: %dx%d, lines per page: %d", viewportWidth, viewportHeight, linesPerPage);
+  LOG_DBG("TRS", "Viewport: %dx%d, %s per page: %d%s", viewportWidth, viewportHeight, isVertical ? "columns" : "lines",
+          linesPerPage, isVertical ? "" : " (horizontal)");
 
   // Try to load cached page index first
   if (loadPageIndexCache()) {
@@ -500,6 +517,17 @@ void TxtReaderActivity::drawCheckbox(const int gutterX, const int y, const int l
   }
 }
 
+// Walks `count` UTF-8 codepoints, stopping at `len`. Returns the byte offset
+// reached, which is what the wrap loop wants.
+size_t TxtReaderActivity::advanceCodepoints(const char* text, const size_t len, const int count) {
+  size_t i = 0;
+  for (int taken = 0; taken < count && i < len; taken++) {
+    i++;
+    while (i < len && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) i++;
+  }
+  return i;
+}
+
 bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
                                          std::vector<CheckboxRef>* outCheckboxes) {
   outLines.clear();
@@ -606,7 +634,12 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       const char* segment = line.c_str() + lineBytePos;
       const size_t segmentLen = displayLen - lineBytePos;
 
-      size_t breakPos = renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR);
+      // Horizontally the break is a measured width; vertically it is a count,
+      // because every codepoint occupies one cell and there is nothing to
+      // measure. Both produce the same thing: how many bytes go in this unit.
+      size_t breakPos = isVertical
+                            ? advanceCodepoints(segment, segmentLen, charsPerUnit)
+                            : renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR);
 
       if (breakPos >= segmentLen) {
         outLines.emplace_back(segment, segmentLen);
@@ -727,6 +760,14 @@ void TxtReaderActivity::render(RenderLock&&) {
 
 void TxtReaderActivity::renderPage() {
   const int lineHeight = renderer.getLineHeight(cachedFontId);
+
+  // Vertical takes a separate path and returns. Nothing below this line runs for
+  // it, so the horizontal rendering is the same code it was — which is what
+  // "horizontal must not change by a pixel" means in practice.
+  if (isVertical) {
+    renderPageVertical(lineHeight);
+    return;
+  }
   const int contentWidth = viewportWidth;
 
   // Text starts after the marker gutter (zero-width unless this is a .md file),
@@ -804,6 +845,41 @@ void TxtReaderActivity::renderPage() {
     ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(true); });
   }
   // scope destructor clears font cache via FontCacheManager
+}
+
+// Columns run right to left, characters down each one. The page index and the
+// byte offsets are untouched: a "line" of currentPageLines is a column here, and
+// nothing else in the activity has to know the difference.
+void TxtReaderActivity::renderPageVertical(const int lineHeight) {
+  (void)lineHeight;
+  const int contentRight = cachedOrientedMarginLeft + viewportWidth;
+
+  auto renderColumns = [&]() {
+    int columnIndex = 0;
+    for (const auto& column : currentPageLines) {
+      if (!column.empty()) {
+        // (columnIndex + 1) because x names the column's left edge and columns
+        // are laid out from the right.
+        const int x = contentRight - (columnIndex + 1) * columnWidth + (columnWidth - cellSize) / 2;
+        renderer.drawTextVertical(cachedFontId, x, cachedOrientedMarginTop, cellSize, column.c_str());
+      }
+      columnIndex++;
+    }
+  };
+
+  auto* fcm = renderer.getFontCacheManager();
+  auto scope = fcm->createPrewarmScope();
+  renderColumns();  // scan pass — text accumulated, no drawing
+  scope.endScanAndPrewarm();
+
+  renderColumns();
+  renderStatusBar();
+
+  ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+
+  if (SETTINGS.textAntiAliasing) {
+    ReaderUtils::renderAntiAliased(renderer, [&renderColumns]() { renderColumns(); });
+  }
 }
 
 void TxtReaderActivity::renderStatusBar() const {
@@ -962,7 +1038,8 @@ bool TxtReaderActivity::loadPageIndexCache() {
   // - uint8_t: cache version
   // - uint32_t: file size (to validate cache)
   // - int32_t: viewport width
-  // - int32_t: lines per page
+  // - int32_t: lines per page (columns per page when writing vertically)
+  // - int32_t: characters down one column (0 when writing horizontally)
   // - int32_t: font ID (to invalidate cache on font change)
   // - int32_t: screen margin (to invalidate cache on margin change)
   // - uint8_t: paragraph alignment (to invalidate cache on alignment change)
@@ -1012,6 +1089,19 @@ bool TxtReaderActivity::loadPageIndexCache() {
   serialization::readPod(f, cachedLines);
   if (cachedLines != linesPerPage) {
     LOG_DBG("TRS", "Cache lines per page mismatch, rebuilding");
+    return false;
+  }
+
+  // The two factors of a page's capacity. Horizontally viewportHeight is already
+  // folded into linesPerPage, so viewportWidth plus that pair covers everything
+  // that can move a page boundary. Vertically viewportWidth folds into the column
+  // count instead and the height has nowhere to go, so it is stored outright.
+  // Changing line spacing or the writing direction moves one of these two, which
+  // is why neither setting needs a field of its own.
+  int32_t cachedCharsPerUnit;
+  serialization::readPod(f, cachedCharsPerUnit);
+  if (cachedCharsPerUnit != charsPerUnit) {
+    LOG_DBG("TRS", "Cache chars per unit mismatch, rebuilding");
     return false;
   }
 
@@ -1069,6 +1159,7 @@ void TxtReaderActivity::savePageIndexCache() const {
   serialization::writePod(f, static_cast<uint32_t>(txt->getFileSize()));
   serialization::writePod(f, static_cast<int32_t>(viewportWidth));
   serialization::writePod(f, static_cast<int32_t>(linesPerPage));
+  serialization::writePod(f, static_cast<int32_t>(charsPerUnit));
   serialization::writePod(f, static_cast<int32_t>(cachedFontId));
   serialization::writePod(f, static_cast<int32_t>(cachedScreenMargin));
   serialization::writePod(f, cachedParagraphAlignment);
