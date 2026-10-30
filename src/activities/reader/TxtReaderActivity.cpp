@@ -70,6 +70,12 @@ void TxtReaderActivity::onEnter() {
 void TxtReaderActivity::onExit() {
   Activity::onExit();
 
+#if defined(TXT_INDEX_VERIFY) && TXT_INDEX_VERIFY
+  // TEMPORARY — see the declaration in the header. Must run before pageOffsets
+  // is cleared and before txt is released.
+  writeIndexVerifyReport();
+#endif
+
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
@@ -759,6 +765,22 @@ void TxtReaderActivity::render(RenderLock&&) {
 }
 
 void TxtReaderActivity::renderPage() {
+#if defined(TXT_INDEX_VERIFY) && TXT_INDEX_VERIFY
+  // TEMPORARY — times whichever path is taken below, including the early return
+  // for vertical. Remove with the rest of the TXT_INDEX_VERIFY code.
+  struct RenderTimer {
+    TxtReaderActivity* self;
+    unsigned long t0 = millis();
+    ~RenderTimer() {
+      const unsigned long ms = millis() - t0;
+      if (self->renderMsCount == 0 || ms < self->renderMsMin) self->renderMsMin = ms;
+      if (ms > self->renderMsMax) self->renderMsMax = ms;
+      self->renderMsTotal += ms;
+      self->renderMsCount++;
+    }
+  } renderTimer{this};
+#endif
+
   const int lineHeight = renderer.getLineHeight(cachedFontId);
 
   // Vertical takes a separate path and returns. Nothing below this line runs for
@@ -1172,6 +1194,102 @@ void TxtReaderActivity::savePageIndexCache() const {
 
   LOG_DBG("TRS", "Saved page index cache: %d pages", totalPages);
 }
+
+#if defined(TXT_INDEX_VERIFY) && TXT_INDEX_VERIFY
+// TEMPORARY — see the declaration in the header. Remove the whole block, the
+// onExit() call, the render timer in renderPage(), and -DTXT_INDEX_VERIFY.
+void TxtReaderActivity::writeIndexVerifyReport() {
+  if (!txt || !indexComplete || pageOffsets.empty()) {
+    LOG_DBG("TRS", "Index verify skipped (index not complete)");
+    return;
+  }
+
+  // Lay the whole book out again in one pass. Same call the incremental build
+  // uses, so a mismatch means the two orders of the same work disagree — which
+  // is exactly what is being tested.
+  std::vector<size_t> oneshot;
+  oneshot.reserve(pageOffsets.size() + 8);
+  oneshot.push_back(0);
+
+  const size_t fileSize = txt->getFileSize();
+  size_t offset = 0;
+  size_t pageCount = 0;
+  bool stopped = false;
+  std::vector<std::string> lines;
+  const unsigned long t0 = millis();
+
+  txt->beginSequentialRead();
+  while (offset < fileSize) {
+    size_t next = offset;
+    if (!loadPageAtOffset(offset, lines, next) || next <= offset) {
+      stopped = true;
+      break;
+    }
+    offset = next;
+    if (offset < fileSize) oneshot.push_back(offset);
+    if (++pageCount % 20 == 0) vTaskDelay(1);
+  }
+  txt->endSequentialRead();
+  const unsigned long buildMs = millis() - t0;
+
+  // First page whose start offset differs. -1 when every page agrees.
+  long firstMismatch = -1;
+  const size_t common = std::min(pageOffsets.size(), oneshot.size());
+  for (size_t i = 0; i < common; i++) {
+    if (pageOffsets[i] != oneshot[i]) {
+      firstMismatch = static_cast<long>(i);
+      break;
+    }
+  }
+  if (firstMismatch < 0 && pageOffsets.size() != oneshot.size()) {
+    firstMismatch = static_cast<long>(common);
+  }
+
+  const bool ok = !stopped && firstMismatch < 0 && pageOffsets.size() == oneshot.size();
+
+  // Rewritten, not appended: HalStorage has no append mode, and one book per
+  // run is enough — the procedure asks for the file after each book.
+  HalFile f;
+  if (!Storage.openFileForWrite("TRS", "/index-verify-v.txt", f)) {
+    LOG_ERR("TRS", "Index verify: cannot open /index-verify-v.txt");
+    return;
+  }
+
+  char line[256];
+  int n = snprintf(line, sizeof(line), "book=%s\n", txt->getPath().c_str());
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  n = snprintf(line, sizeof(line), "vertical=%d bytes=%u\n", isVertical ? 1 : 0, static_cast<unsigned>(fileSize));
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  n = snprintf(line, sizeof(line),
+               "lazy pages: %u   oneshot pages: %u   first mismatch: ", static_cast<unsigned>(pageOffsets.size()),
+               static_cast<unsigned>(oneshot.size()));
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  if (firstMismatch < 0) {
+    n = snprintf(line, sizeof(line), "none   %s\n", ok ? "INDEX OK" : "INDEX STOPPED EARLY");
+  } else {
+    n = snprintf(line, sizeof(line), "%ld   INDEX MISMATCH\n   lazy=%u oneshot=%u\n", firstMismatch,
+                 static_cast<unsigned>(pageOffsets[firstMismatch]),
+                 static_cast<unsigned>(firstMismatch < static_cast<long>(oneshot.size()) ? oneshot[firstMismatch] : 0));
+  }
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  n = snprintf(line, sizeof(line), "layout: font=%d margin=%d cell=%d column=%d charsPerUnit=%d units=%d\n",
+               cachedFontId, cachedScreenMargin, cellSize, columnWidth, charsPerUnit, linesPerPage);
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  n = snprintf(line, sizeof(line), "oneshot build: %lu ms\n", buildMs);
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+  if (renderMsCount > 0) {
+    n = snprintf(line, sizeof(line), "page render: n=%lu min=%lu avg=%lu max=%lu ms\n", renderMsCount, renderMsMin,
+                 renderMsTotal / renderMsCount, renderMsMax);
+  } else {
+    n = snprintf(line, sizeof(line), "page render: no samples\n");
+  }
+  f.write(reinterpret_cast<const uint8_t*>(line), n);
+
+  LOG_DBG("TRS", "Index verify: lazy=%u oneshot=%u mismatch=%ld %s", static_cast<unsigned>(pageOffsets.size()),
+          static_cast<unsigned>(oneshot.size()), firstMismatch, ok ? "OK" : "FAIL");
+  if (auto* fcm = renderer.getFontCacheManager()) fcm->logStats("index-verify");
+}
+#endif
 
 ScreenshotInfo TxtReaderActivity::getScreenshotInfo() const {
   ScreenshotInfo info;

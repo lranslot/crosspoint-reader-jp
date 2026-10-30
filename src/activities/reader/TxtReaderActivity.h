@@ -104,6 +104,25 @@ class TxtReaderActivity final : public Activity {
 
   bool writeCheckbox(const CheckboxRef& cb) const;
 
+#if defined(TXT_INDEX_VERIFY) && TXT_INDEX_VERIFY
+  // --- TEMPORARY: index equivalence verification (F-5 completion condition 2) ---
+  // Rebuilds the whole index in one pass and compares it page for page with the
+  // one built incrementally, then writes the result to /index-verify-v.txt.
+  // Runs from onExit() rather than when the index completes, so the reader never
+  // stalls mid-book for the ~20 s the one-shot build takes.
+  //
+  // Remove this declaration, its definition, the onExit() call, the render timing
+  // under the same guard, and -DTXT_INDEX_VERIFY from platformio.ini together.
+  // See docs-jp/f5-verify-procedure.md.
+  void writeIndexVerifyReport();
+
+  // Page render timing, accumulated over the session by renderPage().
+  unsigned long renderMsCount = 0;
+  unsigned long renderMsTotal = 0;
+  unsigned long renderMsMin = 0;
+  unsigned long renderMsMax = 0;
+#endif
+
   // Cached settings for cache validation (different fonts/margins require re-indexing)
   int cachedFontId = 0;
   uint8_t cachedScreenMargin = 0;
