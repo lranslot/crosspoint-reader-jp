@@ -2282,6 +2282,13 @@ void GfxRenderer::drawLeaderDots(const EpdFontFamily& font, const int cellLeft, 
   // it. Drawing the dots is therefore closer to what UTR #50 is asking for than
   // its own fallback is. The dot is cut from the font's own ellipsis so it
   // matches whatever face the reader installed.
+  //
+  // Guarded like every other drawing primitive: drawTextVertical() returns
+  // before the character loop while scanning, so this is unreachable then, but
+  // a drawing function that does not know about the scan pass is exactly the
+  // defect this path already had once (see spec 8.7).
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
+
   const EpdGlyph* glyph = font.getGlyph(0x2026, style);
   const EpdFontData* fontData = font.getData(style);
   if (glyph == nullptr || fontData == nullptr || glyph->width == 0) return;
@@ -2338,6 +2345,48 @@ void GfxRenderer::drawTextVertical(const int fontId, const int x, const int y, c
   // the string's content, so asking per character would let the face change
   // partway down.
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
+
+  // The scan pass draws nothing. It tells the font cache which glyphs the page
+  // needs so one sweep of the .cpfont can load them all; a draw API that does
+  // not do this leaves the real pass to open the file once per glyph, which for
+  // a page of Japanese is hundreds of opens (see spec 8.7).
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
+    fontCacheManager_->recordText(text, resolvedFontId, style);
+
+    // Two of the characters below are drawn with a glyph other than their own,
+    // and recording `text` alone misses exactly those: a half-width digit is
+    // set as its full-width form, and both ellipses are built from U+2026's
+    // glyph. Recorded in addition to `text`, not instead of it, because the
+    // half-width digit stays the fallback when the font has no full-width form.
+    char extra[1 + 10 * 3 + 3] = {};  // ten full-width digits, U+2026, NUL
+    size_t n = 0;
+    uint16_t digitsSeen = 0;
+    bool ellipsisSeen = false;
+    auto appendBmp = [&extra, &n](const uint32_t cp) {
+      // Every codepoint appended here is in U+0800..U+FFFF, so three bytes.
+      extra[n++] = static_cast<char>(0xE0 | (cp >> 12));
+      extra[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+      extra[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+    };
+    const unsigned char* q = reinterpret_cast<const unsigned char*>(text);
+    while (*q != '\0') {
+      const uint32_t cp = utf8NextCodepoint(&q);
+      if (cp == 0) break;
+      if (cp >= '0' && cp <= '9') {
+        const auto bit = static_cast<uint16_t>(1u << (cp - '0'));
+        if ((digitsSeen & bit) == 0) {
+          digitsSeen |= bit;
+          appendBmp(toFullWidthDigit(cp));
+        }
+      } else if ((cp == 0x2026 || cp == 0x2025) && !ellipsisSeen) {
+        ellipsisSeen = true;
+        appendBmp(0x2026);
+      }
+    }
+    if (n > 0) fontCacheManager_->recordText(extra, resolvedFontId, style);
+    return;
+  }
+
   const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);
