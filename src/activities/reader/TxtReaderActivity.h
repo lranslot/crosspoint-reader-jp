@@ -83,6 +83,16 @@ class TxtReaderActivity final : public Activity {
   // measured at 1.14 and at 1.44 in the two halves of one family — and a column
   // pitch that moves with the font is not a typesetting decision.
   static constexpr int COLUMN_RATIO_PERCENT[] = {115, 130, 150};
+  // Borrowing lineSpacing's enum means depending on how many values it has, not
+  // just on their names. Adding a step to LINE_COMPRESSION without adding a
+  // ratio here would leave the new step indexing past the array: the use site
+  // falls back to NORMAL rather than reading out of bounds, so the column pitch
+  // would quietly stop following the setting instead of failing. This turns that
+  // into a build error that names the place. Upstream has already made this
+  // change twice — #3037 added a fourth step and #4174 replaced the steps with
+  // seven percentages — so following upstream will land here first.
+  static_assert(std::size(COLUMN_RATIO_PERCENT) == CrossPointSettings::LINE_COMPRESSION_COUNT,
+                "COLUMN_RATIO_PERCENT needs one column pitch per CrossPointSettings::LINE_COMPRESSION step");
 
   // Advance `count` codepoints from `text`, stopping at `len`. Vertical writing
   // breaks on a character count, not a measured width: every codepoint takes one
