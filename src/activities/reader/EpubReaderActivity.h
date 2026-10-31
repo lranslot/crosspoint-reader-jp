@@ -216,6 +216,10 @@ class EpubReaderActivity final : public Activity {
   // speed would only burn battery; the paused gate still retries every loop pass).
   bool skipLoopDelay() override { return section && section->isBuilding() && !buildHeapPaused; }
   bool isReaderActivity() const override { return true; }
+  // BY_SCREEN turns the page here instead of confirming: Confirm opens the reader
+  // menu, and a page turn is what the power button is for while reading.
+  // ReaderUtils::detectPageTurn() reads the setting.
+  bool powerButtonActsAsConfirm() const override { return false; }
   bool handleForcedRefresh() override {
     {
       RenderLock lock(*this);

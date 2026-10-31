@@ -138,6 +138,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     FORCE_REFRESH = 3,
     FOOTNOTES = 4,
     CHECKBOX = 5,
+    // One binding that means whatever the screen in front of the user means by
+    // "confirm": the reading screens turn the page, a .md toggles its checkbox,
+    // everything else activates the selection. Appended, so the five stored
+    // values above keep their meaning and their behaviour.
+    BY_SCREEN = 6,
     SHORT_PWRBTN_COUNT
   };
 

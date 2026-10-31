@@ -96,7 +96,12 @@ void TxtReaderActivity::loop() {
   // resolve to the same pin, so consuming the edge here would swallow the page turn
   // the same frame would otherwise perform — behaviour that held before latching
   // was introduced and should keep holding.
-  if (isMarkdown && SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CHECKBOX &&
+  // BY_SCREEN lands here too: a .md is a checklist, so toggling the checkbox is
+  // what its confirm means. Returns either way, so the page-turn route below never
+  // also fires for the same press.
+  if (isMarkdown &&
+      (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CHECKBOX ||
+       SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::BY_SCREEN) &&
       mappedInput.wasReleased(MappedInputManager::Button::Power) &&
       !mappedInput.wasReleasedPeek(MappedInputManager::Button::Down)) {
     if (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size())) {

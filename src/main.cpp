@@ -462,6 +462,10 @@ void loop() {
   static unsigned long lastMemPrint = 0;
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
+  // Re-decided every pass: the setting can change under us, and the answer depends
+  // on which activity is on screen.
+  mappedInputManager.setPowerActsAsConfirm(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::BY_SCREEN &&
+                                           activityManager.powerButtonActsAsConfirm());
   gpio.update();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
@@ -508,6 +512,11 @@ void loop() {
         RenderLock lock;
         ScreenshotUtil::takeScreenshot(renderer);
       }
+      // The power press that started the chord may already be latched from an
+      // earlier pass. Writing the screenshot takes long enough that the chord can
+      // end after the latch would otherwise still be live, and under BY_SCREEN a
+      // live power latch reads as a Confirm on whatever screen was captured.
+      mappedInputManager.clearPowerLatches();
     }
     return;
   }

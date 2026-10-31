@@ -60,6 +60,20 @@ class MappedInputManager {
   // Drops every latch. Called when the screen changes: a press aimed at the
   // previous activity must not fire on the one that replaced it.
   void clearLatches() const;
+  // SHORT_PWRBTN::BY_SCREEN: let the power button stand in for Confirm.
+  //
+  // Set once per main-loop pass rather than read from SETTINGS here, because the
+  // answer depends on two things this class cannot see: the setting, and whether
+  // the activity on screen has a meaning of its own for the power button (the
+  // reading screens turn the page, the image viewer steps to the next image).
+  // Keeping the decision in main() means there is one place to read it.
+  void setPowerActsAsConfirm(bool enabled) const { powerActsAsConfirm = enabled; }
+  // Drops a latched power edge. For the screenshot chord: main() returns before any
+  // activity runs while the chord is held, so a live edge never reaches a screen,
+  // but a latch armed before DOWN went down would outlive the chord. Only the two
+  // screens that drive update() themselves can hold such a latch, which is exactly
+  // where a screenshot is slow enough for it to matter.
+  void clearPowerLatches() const;
   bool hasTouch() const;
   bool wasScreenTapped(int& x, int& y) const;
   bool wasScreenTouchDown(int& x, int& y) const;
@@ -123,6 +137,17 @@ class MappedInputManager {
   // decompose, single buttons check the live edge then the latch. `consume`
   // clears the latch on a hit; peeking leaves it for the next reader.
   bool consumeEdge(Button button, bool pressed, bool consume) const;
+  // The power button answering for Confirm under SHORT_PWRBTN::BY_SCREEN.
+  //
+  // Only the *release* edge is borrowed, and it answers both the pressed and the
+  // released query. A press is not yet known to be short — holding power past
+  // getPowerButtonDuration() sleeps the device — so acting on the press edge would
+  // let a deliberate power-off install firmware or clear the cache on its way out.
+  // Answering both queries from the one edge is what makes the screens that pair a
+  // wasPressed() flag with wasReleased() (the keyboard, the dictionary word
+  // selector) work: the live edge is readable by every caller in the same pass, so
+  // neither half is swallowed.
+  bool powerStandsInForConfirm(bool consume) const;
   bool wasBackGesture() const;
   // Fetch the pending swipe (if any) and map both endpoints to logical screen coords
   bool decodeSwipe(int& sx, int& sy, int& ex, int& ey) const;
@@ -141,6 +166,8 @@ class MappedInputManager {
   // Long enough to bridge the worst measured blind window (957 ms while a chapter
   // builds), short enough that a press cannot outlive the screen it was meant for.
   static constexpr unsigned long LATCH_MAX_AGE_MS = 1500;
+
+  mutable bool powerActsAsConfirm = false;
 
   mutable bool pressLatched[LATCH_PIN_COUNT] = {};
   mutable bool releaseLatched[LATCH_PIN_COUNT] = {};

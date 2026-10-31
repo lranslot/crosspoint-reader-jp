@@ -279,6 +279,12 @@ bool ActivityManager::isReaderActivity() const {
          (currentActivity && currentActivity->isReaderActivity());
 }
 
+// Only the activity on screen is asked, not the stack: a reader sitting under its
+// own menu must not make the menu behave like a reading screen.
+bool ActivityManager::powerButtonActsAsConfirm() const {
+  return !currentActivity || currentActivity->powerButtonActsAsConfirm();
+}
+
 bool ActivityManager::handleForcedRefresh() { return currentActivity && currentActivity->handleForcedRefresh(); }
 
 bool ActivityManager::skipLoopDelay() const { return currentActivity && currentActivity->skipLoopDelay(); }

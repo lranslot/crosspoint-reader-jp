@@ -174,6 +174,9 @@ class TxtReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
+  // BY_SCREEN turns the page here instead of confirming, and toggles the checkbox
+  // in a .md — both handled in loop(), neither of them Confirm.
+  bool powerButtonActsAsConfirm() const override { return false; }
   // Suppress the loop's tail delay and power saving while the index is still being
   // built incrementally, and only then.
   //

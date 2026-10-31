@@ -382,6 +382,11 @@ void MappedInputManager::update() const {
   }
 }
 
+void MappedInputManager::clearPowerLatches() const {
+  pressLatched[HalGPIO::BTN_POWER] = false;
+  releaseLatched[HalGPIO::BTN_POWER] = false;
+}
+
 void MappedInputManager::clearLatches() const {
   for (uint8_t pin = 0; pin < LATCH_PIN_COUNT; pin++) {
     pressLatched[pin] = false;
@@ -434,6 +439,32 @@ bool MappedInputManager::consumeEdge(const Button button, const bool pressed, co
   if (live || latch) {
     if (consume) {
       latch = false;
+    }
+    return true;
+  }
+
+  // Checked last, so the real button always answers first and nothing that worked
+  // before behaves differently.
+  if (button == Button::Confirm && powerActsAsConfirm) {
+    return powerStandsInForConfirm(consume);
+  }
+  return false;
+}
+
+bool MappedInputManager::powerStandsInForConfirm(const bool consume) const {
+  // POWER+DOWN is the screenshot chord. main() already returns before any activity
+  // runs for every pass of it, release included, so the live edge cannot reach a
+  // screen; this is the belt to that braces, and it is what covers a latch armed
+  // before DOWN went down.
+  if (gpio.isPressed(HalGPIO::BTN_DOWN)) {
+    return false;
+  }
+  if (gpio.wasReleased(HalGPIO::BTN_POWER)) {
+    return true;
+  }
+  if (releaseLatched[HalGPIO::BTN_POWER]) {
+    if (consume) {
+      releaseLatched[HalGPIO::BTN_POWER] = false;
     }
     return true;
   }

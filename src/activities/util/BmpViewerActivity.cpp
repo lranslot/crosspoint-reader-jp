@@ -211,6 +211,16 @@ void BmpViewerActivity::loop() {
     return;
   }
 
+  // See powerButtonActsAsConfirm(): next image, not "set as sleep cover". Placed
+  // before the Confirm check so the two stay visibly adjacent; Down is excluded
+  // because POWER+DOWN is the screenshot chord.
+  if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::BY_SCREEN &&
+      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      !mappedInput.wasReleasedPeek(MappedInputManager::Button::Down)) {
+    openSibling(1);
+    return;
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     doSetSleepCover();
     return;

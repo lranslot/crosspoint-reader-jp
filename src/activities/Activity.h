@@ -44,6 +44,15 @@ class Activity {
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }
   virtual bool isReaderActivity() const { return false; }
+  // Whether SHORT_PWRBTN::BY_SCREEN lets the power button stand in for this
+  // screen's own Confirm. A screen that has a meaning of its own for the power
+  // button says no here and handles the edge itself.
+  //
+  // Deliberately separate from isReaderActivity(): that answers "is a book open",
+  // which the sleep and tilt paths need and which stays true for the reader's own
+  // menus and lists while they are on screen. Those are lists, so Confirm is
+  // exactly what the power button should do there.
+  virtual bool powerButtonActsAsConfirm() const { return true; }
   // Returns true when the activity schedules its own forced refresh.
   virtual bool handleForcedRefresh() { return false; }
   virtual bool isHomeActivity() const { return false; }

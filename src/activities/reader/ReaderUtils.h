@@ -59,7 +59,11 @@ inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
       tiltPrev ||
       (usePress ? (input.wasPressed(MappedInputManager::Button::PageBack) || input.wasPressed(prevButton))
                 : (input.wasReleased(MappedInputManager::Button::PageBack) || input.wasReleased(prevButton)));
-  const bool powerTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
+  // BY_SCREEN means "whatever this screen's confirm means", and on a reading
+  // screen that is a page turn. The .md checkbox toggle is the one exception and
+  // returns before this is reached (TxtReaderActivity::loop()).
+  const bool powerTurn = (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN ||
+                          SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::BY_SCREEN) &&
                          input.wasReleased(MappedInputManager::Button::Power);
   const bool next = tiltNext || (usePress ? (input.wasPressed(MappedInputManager::Button::PageForward) || powerTurn ||
                                              input.wasPressed(nextButton))

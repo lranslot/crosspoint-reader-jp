@@ -49,6 +49,10 @@ class XtcReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return true; }
+  // BY_SCREEN turns the page here instead of confirming: Confirm opens the reader
+  // menu, and a page turn is what the power button is for while reading.
+  // ReaderUtils::detectPageTurn() reads the setting.
+  bool powerButtonActsAsConfirm() const override { return false; }
   bool handleForcedRefresh() override {
     {
       RenderLock lock(*this);
