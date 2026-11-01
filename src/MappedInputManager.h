@@ -141,7 +141,7 @@ class MappedInputManager {
   //
   // Only the *release* edge is borrowed, and it answers both the pressed and the
   // released query. A press is not yet known to be short — holding power past
-  // getPowerButtonDuration() sleeps the device — so acting on the press edge would
+  // getPowerButtonSleepHoldMs() sleeps the device — so acting on the press edge would
   // let a deliberate power-off install firmware or clear the cache on its way out.
   // Answering both queries from the one edge is what makes the screens that pair a
   // wasPressed() flag with wasReleased() (the keyboard, the dictionary word

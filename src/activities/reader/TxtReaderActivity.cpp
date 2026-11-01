@@ -99,10 +99,18 @@ void TxtReaderActivity::loop() {
   // BY_SCREEN lands here too: a .md is a checklist, so toggling the checkbox is
   // what its confirm means. Returns either way, so the page-turn route below never
   // also fires for the same press.
+  //
+  // A page with no checkbox on it has nothing to toggle, so the press falls
+  // through instead of being swallowed: under BY_SCREEN it reaches the page-turn
+  // route below, which is what "whatever this screen's confirm means" amounts to
+  // on a page that is just text. Tested before wasReleased() so the edge is not
+  // consumed on the way past. Under CHECKBOX the fall-through turns no page —
+  // ReaderUtils only turns on PAGE_TURN and BY_SCREEN — so that setting keeps
+  // doing exactly nothing there, as it did before.
   if (isMarkdown &&
       (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::CHECKBOX ||
        SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::BY_SCREEN) &&
-      mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+      !pageCheckboxes.empty() && mappedInput.wasReleased(MappedInputManager::Button::Power) &&
       !mappedInput.wasReleasedPeek(MappedInputManager::Button::Down)) {
     if (selectedCheckbox >= 0 && selectedCheckbox < static_cast<int>(pageCheckboxes.size())) {
       const unsigned long t0 = millis();

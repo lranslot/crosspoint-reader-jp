@@ -311,9 +311,46 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   SdFontIdResolver sdFontIdResolver = nullptr;
   void* sdFontResolverCtx = nullptr;
 
-  uint16_t getPowerButtonDuration() const {
-    return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
+  // --- Power button hold thresholds ---
+  //
+  // DO NOT merge these two into one constant. They are not the same threshold,
+  // and the compiler cannot tell you so.
+  //
+  // The sleep side uses the value it is given, verbatim, as the hold threshold.
+  // The wake side (verifyPowerButtonWakeup) subtracts the time already elapsed
+  // since boot from it, on the assumption that the button was held throughout
+  // boot. By the time that runs, millis() is past 400 — the USB CDC settle
+  // delay, SD card init and five settings loads have all happened — so the
+  // subtraction clamps to its floor of 1 ms and the 400 is fully consumed.
+  //
+  // That is why the two values must stay separate. Raise the number handed to
+  // the wake side and the subtraction stops clamping whenever boot happens to
+  // reach that line sooner than the new value. A threshold that was gone comes
+  // back, and whether it bites depends on how fast the SD card is and whether
+  // serial logging is compiled in. It surfaces as "the device sometimes won't
+  // turn on" — intermittent, and nothing in the sleep code to point at.
+  //
+  // See spec section 8.7 item 17 (a).
+
+  // Hold time that puts the device to sleep. Used verbatim.
+  //
+  // Also the implicit ceiling on a short press: the release never arrives if
+  // sleep fires first, so this value is the width of the short-press window
+  // (spec 8.7-17 (b)). 1200 ms rather than 400 so a press meant as Confirm
+  // under BY_SCREEN does not sleep the device instead.
+  //
+  // Ceiling on this value: MappedInputManager::LATCH_MAX_AGE_MS = 1500. A press
+  // latch expires at that age, which would lose the release edge the short press
+  // is built on (spec 8.7-17 (c)). 1200 leaves 300 ms of margin — that margin is
+  // the whole budget, so anything longer needs the latch age raised first.
+  uint16_t getPowerButtonSleepHoldMs() const {
+    return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 1200;
   }
+
+  // Value handed to HalGPIO::verifyPowerButtonWakeup(). Deliberately still 400,
+  // the pre-split number, so the wake path behaves exactly as it always has.
+  // Do not raise this to match the sleep threshold; read the block above first.
+  static constexpr uint16_t POWER_BUTTON_WAKE_VERIFY_MS = 400;
   int getReaderFontId() const;
 
   // Drop the SD font selection and fall back to the built-in family. The reader

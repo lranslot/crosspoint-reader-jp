@@ -319,7 +319,12 @@ void setup() {
   switch (wakeupReason) {
     case HalGPIO::WakeupReason::PowerButton:
       LOG_DBG("MAIN", "Verifying power button press duration");
-      if (!gpio.verifyPowerButtonWakeup(SETTINGS.getPowerButtonDuration(),
+      // POWER_BUTTON_WAKE_VERIFY_MS, not the sleep threshold. The two were one
+      // constant until 2026-11-02; they must never be one again. See the comment
+      // over both in CrossPointSettings.h — raising the number passed here
+      // revives a threshold that the boot-elapsed subtraction currently cancels,
+      // intermittently, as "the device sometimes won't turn on".
+      if (!gpio.verifyPowerButtonWakeup(CrossPointSettings::POWER_BUTTON_WAKE_VERIFY_MS,
                                         SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP)) {
         powerManager.startDeepSleep(gpio);
       }
@@ -540,7 +545,7 @@ void loop() {
   }
 
   if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
-      gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
+      gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonSleepHoldMs()) {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_DOWN)) {
       return;
