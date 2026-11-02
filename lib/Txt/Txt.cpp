@@ -19,7 +19,12 @@ constexpr uint32_t ENCODING_MAGIC = 0x54584543;  // "TXEC"
 // v2 added the converted size, which is what proves content.u8 is complete.
 // v3 added the Aozora strip flag, and changes what content.u8 holds, so every
 // existing copy has to be rebuilt.
-constexpr uint8_t ENCODING_VERSION = 3;
+// v4 keeps the Aozora indent annotations as ideographic spaces and separates
+// block headings with a blank line, so content.u8 differs byte for byte from v3
+// for any Aozora file that uses them. Every offset derived from it moves with
+// it, which is why this is a version and not a setting: the page index and the
+// saved reading position are both byte offsets into this file.
+constexpr uint8_t ENCODING_VERSION = 4;
 }  // namespace
 
 Txt::Txt(std::string path, std::string cacheBasePath)
@@ -317,6 +322,20 @@ bool Txt::convertToUtf8(const size_t sourceSize, size_t& convertedSize) {
     }
     const size_t avail = carry + static_cast<size_t>(read);
     if (avail == 0) {
+      // Nothing more to read and nothing held back by the encoder. The strip
+      // scan can still be holding a line, which happens when the file's length
+      // is an exact multiple of CONVERT_CHUNK and so no earlier pass was ever
+      // told it was the last. Flush it, or the final line is dropped.
+      if (stripAozora) {
+        stripped.clear();
+        strip.process("", 0, stripped, /*atEnd=*/true);
+        if (!stripped.empty()) {
+          if (out.write(stripped.data(), stripped.size()) != stripped.size()) {
+            ok = false;
+          }
+          outputBytes += stripped.size();
+        }
+      }
       break;
     }
     const bool atEnd = (read == 0) || (static_cast<size_t>(read) < CONVERT_CHUNK - carry);
@@ -517,17 +536,20 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
 
   const std::string& path = filepath;
   char buf[512];
-  const int n = snprintf(buf, sizeof(buf),
-                         "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
-                         "removed: ruby=%lu range=%lu note=%lu headerLines=%lu\n"
-                         "gaiji: restored=%lu geta=%lu\n"
-                         "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
-                         "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
-                         path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
-                         static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.note),
-                         static_cast<unsigned long>(stats.headerLines),
-                         static_cast<unsigned long>(stats.gaijiRestored),
-                         static_cast<unsigned long>(stats.gaijiGeta), rubyOpen, rubyClose, noteOpen, range, kome);
+  const int n =
+      snprintf(buf, sizeof(buf),
+               "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
+               "removed: ruby=%lu range=%lu note=%lu headerLines=%lu\n"
+               "gaiji: restored=%lu geta=%lu\n"
+               "indent: lines=%lu ranges=%lu tooWide=%lu blanksAdded=%lu\n"
+               "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
+               "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
+               path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
+               static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.note),
+               static_cast<unsigned long>(stats.headerLines), static_cast<unsigned long>(stats.gaijiRestored),
+               static_cast<unsigned long>(stats.gaijiGeta), static_cast<unsigned long>(stats.indentLines),
+               static_cast<unsigned long>(stats.indentRanges), static_cast<unsigned long>(stats.indentTooWide),
+               static_cast<unsigned long>(stats.blanksAdded), rubyOpen, rubyClose, noteOpen, range, kome);
 
   HalFile log = Storage.open("/aozora-strip.txt", O_WRITE | O_CREAT | O_AT_END);
   if (log && n > 0) {

@@ -29,7 +29,30 @@ class AozoraStrip {
     uint32_t gaijiRestored = 0;  // ※［＃…U+xxxx…］ replaced with that codepoint
     uint32_t gaijiGeta = 0;      // ※［＃…］ with no U+ replaced with 〓
     uint32_t headerLines = 0;    // lines dropped with the legend block
+    uint32_t indentLines = 0;    // ［＃N字下げ］ turned into N ideographic spaces
+    uint32_t indentRanges = 0;   // ［＃ここからN字下げ］ ranges applied
+    uint32_t indentTooWide = 0;  // ranged indents dropped as too wide to be indents
+    uint32_t blanksAdded = 0;    // blank lines inserted around block headings
   };
+
+  // Widest ranged indent still treated as an indent. Beyond this the notation is
+  // not indenting a paragraph at all: Aozora writes ［＃ここから１９字下げ］ to push a
+  // date or an attribution out to the right margin, which is right-alignment
+  // faked with spaces. Replaying that as leading spaces breaks, because the
+  // number was chosen against the book's line length and not ours — at 18 pt a
+  // horizontal line holds 12 full-width characters, so a 19-character indent
+  // overruns the line outright, and a vertical one splits a single line across
+  // two columns with its halves at opposite ends of the page.
+  //
+  // 2 is safe at every size offered: 2 of 12 is 17% of the narrowest line. It
+  // also covers every real indent in the sample books — 27 of the 29 ranged
+  // indents in 戦争史大観 ask for 0 to 2, and the other two are exactly the
+  // faked right-alignment this cap excludes.
+  //
+  // Those two belong to 地付き / 字上げ, which is stage 3's work and needs a
+  // renderer that can right-align. Until then they are dropped — which is what
+  // the previous version did with every ranged indent, so nothing regresses.
+  static constexpr size_t MAX_RANGE_INDENT = 2;
 
   // Drop lines [firstLine, secondLine] inclusive, 0-based, counted over the
   // whole file. Used for the legend block, whose bounds are two rule lines
@@ -50,6 +73,32 @@ class AozoraStrip {
   Stats stats_;
   std::string carry_;   // unterminated markup awaiting the next chunk
   std::string buffer_;  // carry_ + current chunk, scanned in place
+
+  // Output is held one line at a time rather than appended straight to `out`.
+  // A block heading announces itself at the *end* of its line —
+  // ［＃「第一章…」は中見出し］ follows the text it names — so whether a blank line
+  // belongs in front of that line is only known once the line has been read.
+  // Holding the line is what allows that decision without reaching backwards
+  // into output the caller may already have written to the card.
+  //
+  // Bounded: past MAX_LINE_HOLD the line is released and its blank-line decision
+  // is skipped. The bound is on the line, not on the chunk, so a file converts to
+  // the same bytes whatever size the caller happens to read in.
+  static constexpr size_t MAX_LINE_HOLD = 4096;
+  std::string lineOut_;
+  size_t rangeIndent_ = 0;        // ［＃ここからN字下げ］ in force, 0 when none
+  bool headingLine_ = false;      // a block heading was named on this line
+  bool blankBeforeNext_ = false;  // the line just flushed was a block heading
+  bool lastLineBlank_ = true;     // true at the start of a file: no leading blank
+  bool lineReleased_ = false;     // this line outgrew MAX_LINE_HOLD
+
+  // Append the held line to `out`, inserting a blank line in front of it when a
+  // block heading needs one and the file does not already have it.
+  void flushLine(std::string& out, bool withNewline);
+  // Open a line for ordinary content, applying a ranged indent if one is in
+  // force. Called before the first character of a line reaches lineOut_.
+  void beginContent();
+
   size_t lineNumber_ = 0;
   size_t headerFirst_ = 0;
   size_t headerLast_ = 0;
