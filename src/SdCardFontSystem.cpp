@@ -21,6 +21,21 @@ void snapFontPointSizeTo(const uint8_t availablePointSize) {
   SETTINGS.saveToFile();
 }
 
+// A font that cannot be read right now is not a font the user stopped wanting.
+// Keeping the selection is what makes the failure recoverable: the next
+// ensureLoaded() — on the next book opened, or the next boot — tries again, so
+// re-seating the card is enough. Nothing is gained for this boot by dropping it,
+// because getReaderFontId() already falls through to the built-in family while no
+// SD family is loaded, and snaps the point size there without persisting it.
+//
+// Upstream clears the selection here AND saves it (CrossPointSettings.cpp
+// clearSdFontFamily; see spec section 9.2). One failed SD read then permanently
+// forgets the user's CJK font, and every Japanese glyph is a tofu box until they
+// pick it again by hand. A transient read must not spend the user's settings.
+void keepSelectionForNextTry(const char* why, const char* family) {
+  LOG_ERR("SDFS", "SD font unavailable (%s): %s - built-in font for now, selection kept", why, family);
+}
+
 // Built-in UI fonts and their physical point sizes (at 150 DPI, matching the
 // SD-font converter). Each is paired with a same-size SD fallback so CJK UI
 // text matches the surrounding Latin. See SdCardFontSystem::setupUiFallbacks.
@@ -55,12 +70,10 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
         setupUiFallbacks(renderer);
         LOG_DBG("SDFS", "Loaded SD card font family: %s", SETTINGS.sdFontFamilyName);
       } else {
-        LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", SETTINGS.sdFontFamilyName);
-        SETTINGS.clearSdFontFamily();
+        keepSelectionForNextTry("read failed", SETTINGS.sdFontFamilyName);
       }
     } else {
-      LOG_DBG("SDFS", "SD font family not found on card: %s (clearing)", SETTINGS.sdFontFamilyName);
-      SETTINGS.clearSdFontFamily();
+      keepSelectionForNextTry("not on card", SETTINGS.sdFontFamilyName);
     }
   }
 
@@ -99,9 +112,8 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   if (familyMatches) {
     const auto* family = registry_.findFamily(wantedFamily);
     if (!family) {
-      LOG_DBG("SDFS", "SD font family disappeared: %s (clearing)", wantedFamily);
       manager_.unloadAll(renderer);
-      SETTINGS.clearSdFontFamily();
+      keepSelectionForNextTry("disappeared", wantedFamily);
       return;
     }
     const auto* selected = family->findNearestSize(SETTINGS.fontPointSize);
@@ -125,12 +137,10 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
       setupUiFallbacks(renderer);
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);
     } else {
-      LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", wantedFamily);
-      SETTINGS.clearSdFontFamily();
+      keepSelectionForNextTry("read failed", wantedFamily);
     }
   } else {
-    LOG_DBG("SDFS", "SD font family not found: %s (clearing)", wantedFamily);
-    SETTINGS.clearSdFontFamily();
+    keepSelectionForNextTry("not on card", wantedFamily);
   }
 }
 

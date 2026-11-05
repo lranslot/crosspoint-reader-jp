@@ -353,6 +353,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   static constexpr uint16_t POWER_BUTTON_WAKE_VERIFY_MS = 400;
   int getReaderFontId() const;
 
+  // ONLY for a deliberate drop — the user deleting the font file, or choosing a
+  // different family. Never for "could not read it this time": that is a
+  // transient condition, and persisting a clear turns it into a permanent loss of
+  // the user's CJK font (see keepSelectionForNextTry in SdCardFontSystem.cpp).
+  //
   // Drop the SD font selection and fall back to the built-in family. The reader
   // point size comes back into BUILTIN_READER_POINT_SIZES with it, since that is
   // the only set a built-in family ships — otherwise the settings UI would keep
