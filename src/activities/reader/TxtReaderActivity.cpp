@@ -18,6 +18,7 @@
 #include "ProgressFile.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
+#include "SdCardFontSystem.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -251,6 +252,48 @@ void TxtReaderActivity::loop() {
   }
 }
 
+#if READER_OPEN_DIAG
+// One appended line per book opened, written to the SD card because serial is
+// not reachable on the test device. Diagnoses the intermittent report that a
+// book sometimes starts horizontal with tofu in the corner: isVertical depends
+// on nothing but the setting and the .md test, so a horizontal open means one of
+// those two is not what we think it is at that moment. Both are printed next to
+// the path they were derived from, and the font state is printed beside them
+// because the tofu appears at the same time.
+//
+// Appended, never truncated: the failure is intermittent, so a good open and a
+// bad one have to sit next to each other to be compared. Guarded by
+// READER_OPEN_DIAG, which only [env:default] defines.
+void TxtReaderActivity::writeOpenDiagnostic(const int viewportHeight) const {
+  HalFile file;
+  if (!Storage.openFileForWrite("TRS", "/reader-open.txt", file)) {
+    return;  // a diagnostic that cannot be written is not worth a failed open
+  }
+  // openFileForWrite() starts at 0; seek past the existing bytes to append.
+  file.seek(file.size());
+
+  const std::string& path = txt->getPath();
+  const char* wanted = SETTINGS.sdFontFamilyName;
+  const char* loaded = sdFontSystem.loadedFamilyName();
+
+  // Stack budget: one line, well under the 256-byte local limit. The path is
+  // truncated rather than given its own allocation — what matters is the
+  // extension and whether the string has anything odd on its tail.
+  char line[224];
+  const int n = snprintf(line, sizeof(line),
+                         "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d path=[%.60s]\n",
+                         static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library",
+                         isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
+                         static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-",
+                         cachedFontId, viewportWidth, viewportHeight, linesPerPage, path.c_str());
+  if (n > 0) {
+    file.write(line, std::min(static_cast<size_t>(n), sizeof(line) - 1));
+  }
+  // Consume the flag: only the book the boot opened by itself gets "boot".
+  APP_STATE.bootOpenedReader = false;
+}
+#endif
+
 void TxtReaderActivity::initializeReader() {
   if (initialized) {
     return;
@@ -308,6 +351,10 @@ void TxtReaderActivity::initializeReader() {
 
   LOG_DBG("TRS", "Viewport: %dx%d, %s per page: %d%s", viewportWidth, viewportHeight, isVertical ? "columns" : "lines",
           linesPerPage, isVertical ? "" : " (horizontal)");
+
+#if READER_OPEN_DIAG
+  writeOpenDiagnostic(viewportHeight);
+#endif
 
   // Try to load cached page index first
   if (loadPageIndexCache()) {

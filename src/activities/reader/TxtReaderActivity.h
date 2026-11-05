@@ -153,6 +153,10 @@ class TxtReaderActivity final : public Activity {
   void renderStatusBar() const;
 
   void initializeReader();
+#if READER_OPEN_DIAG
+  // Appends one line to /reader-open.txt per book opened. [env:default] only.
+  void writeOpenDiagnostic(int viewportHeight) const;
+#endif
   // outCheckboxes is only passed by render(); buildPageIndex() sweeps every page
   // and must not pay for checkbox scanning.
   bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,

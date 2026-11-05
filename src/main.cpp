@@ -419,6 +419,7 @@ void setup() {
     activityManager.goToCrashReport();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
+    APP_STATE.bootOpenedReader = true;  // for the open diagnostic only
     activityManager.goToReader(APP_STATE.openEpubPath);
   } else if (resume == BootResume::Silent) {
     // target == home (or reader with no open book): land on home — don't fall
@@ -436,6 +437,7 @@ void setup() {
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
+    APP_STATE.bootOpenedReader = true;  // for the open diagnostic only
     activityManager.goToReader(path, allowFastInitialReaderRefresh);
   }
 

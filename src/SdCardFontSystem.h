@@ -32,6 +32,12 @@ class SdCardFontSystem {
   /// Non-const access to the registry (for FontInstaller).
   SdCardFontRegistry& registry() { return registry_; }
 
+  /// The family actually resident right now, "" when none is. This is not the
+  /// same as SETTINGS.sdFontFamilyName, which is what the user chose: the two
+  /// differ exactly when a load failed, which is what keepSelectionForNextTry()
+  /// now leaves standing instead of erasing.
+  const char* loadedFamilyName() const { return manager_.currentFamilyName().c_str(); }
+
   /// Mark the registry as needing re-discovery.
   /// Thread-safe: can be called from the web server task.
   void markRegistryDirty() { registryDirty_.store(true, std::memory_order_release); }

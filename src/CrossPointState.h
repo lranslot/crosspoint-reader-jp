@@ -21,6 +21,12 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
 
+  // Runtime only — deliberately absent from toJson()/fromJson(). setup() sets it
+  // when the boot routed straight into the reader instead of to Home; the first
+  // reader to report it clears it, so every later open is a library open. Only
+  // the open diagnostic reads it.
+  bool bootOpenedReader = false;
+
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
