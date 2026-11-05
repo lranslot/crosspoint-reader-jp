@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <Logging.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 
@@ -33,6 +34,8 @@ class PersistableStoreBase {
   // I/O, and you create a storeMutex/storageMutex ordering hazard. Don't.
   mutable std::mutex storeMutex;
 
+  static std::atomic<bool> saveFailed_;
+
   // fromJson() implementations call this (instead of saveToFile()) when the
   // on-disk JSON used a legacy shape that was upgraded in memory.
   // loadFromFile() performs the save after releasing storeMutex; calling
@@ -50,9 +53,22 @@ class PersistableStoreBase {
   // instead of instantiating serializeJson/deserializeJson in their own TU —
   // that per-TU duplication is exactly what this class exists to prevent.
 
-  // Serializes doc and writes it to path (ensures /.crosspoint exists). Logs on failure.
+  // Serializes doc and writes it to path (ensures /.crosspoint exists), via a
+  // temporary that is renamed into place. Logs on failure, and records it for
+  // consumeSaveFailure().
   static bool writeDocToFile(const char* path, const JsonDocument& doc);
 
+  // True once if any store failed to save, or refused to, since this was last
+  // called. The UI shows one popup on it: a store cannot reach the renderer, and
+  // the device this runs on has no reachable serial log (spec 8.7-23), so a
+  // failure nobody is told about is a failure nobody can act on — which is the
+  // trap this whole area was built out of. Atomic: the web server task saves too.
+  static bool consumeSaveFailure();
+
+ protected:
+  static void noteSaveFailure();
+
+ public:
   // Why a file could not be turned into a document.
   //   Absent      nothing there. Ordinary on first boot.
   //   Unreadable  the file IS there and we failed to get it. On this hardware
@@ -127,6 +143,7 @@ class PersistableStore : public PersistableStoreBase {
     if (loadUnreadable) {
       LOG_ERR("PERSIST", "Refusing to save %s: existing file unreadable, would overwrite it with defaults",
               T::getFilePath());
+      noteSaveFailure();
       return false;
     }
     std::lock_guard<std::mutex> lock(storeMutex);

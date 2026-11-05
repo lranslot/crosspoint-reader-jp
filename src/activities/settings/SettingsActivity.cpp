@@ -3,6 +3,7 @@
 #include <BoardConfig.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <PersistableStore.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -128,6 +129,15 @@ void SettingsActivity::onExit() {
 }
 
 void SettingsActivity::loop() {
+  // A store that could not save has no way to reach the renderer, so it only
+  // raises a flag; this is where the user is standing when it matters. Latched
+  // and consumed, so one failed save shows one popup rather than one per
+  // keypress. Covers both halves of the same problem: a write that failed, and a
+  // write refused because the file on the card could not be read (spec 9.2-14).
+  if (PersistableStoreBase::consumeSaveFailure()) {
+    GUI.drawPopup(renderer, tr(STR_SETTINGS_SAVE_FAILED));
+  }
+
   if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
 
   bool hasChangedCategory = false;

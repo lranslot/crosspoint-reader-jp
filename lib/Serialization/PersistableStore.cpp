@@ -7,12 +7,49 @@
 #include <cstring>
 #include <limits>
 
+std::atomic<bool> PersistableStoreBase::saveFailed_{false};
+
+void PersistableStoreBase::noteSaveFailure() { saveFailed_.store(true, std::memory_order_release); }
+
+bool PersistableStoreBase::consumeSaveFailure() { return saveFailed_.exchange(false, std::memory_order_acquire); }
+
 bool PersistableStoreBase::writeDocToFile(const char* path, const JsonDocument& doc) {
   Storage.mkdir("/.crosspoint");
   String json;
   serializeJson(doc, json);
-  if (!Storage.writeFile(path, json)) {
-    LOG_ERR("PERSIST", "Failed to write %s", path);
+
+  // Written beside the real file and moved into place, because
+  // SDCardManager::writeFile() removes the existing file BEFORE opening the new
+  // one. A failure partway through that leaves either nothing or a truncated
+  // file, and both come back as a loss of every setting: nothing reads as
+  // ReadFailure::Absent (defaults, and saving still allowed, so the defaults
+  // stick), truncated reads as Unreadable. Either way the user's settings are
+  // gone through the write path — the mirror image of the read bug this was
+  // found next to. See spec section 9.2-15.
+  //
+  // The temporary keeps the good bytes until the rename succeeds, so an
+  // interrupted save costs the new value, never the old file.
+  std::string tmp(path);
+  tmp += ".tmp";
+
+  if (!Storage.writeFile(tmp.c_str(), json)) {
+    LOG_ERR("PERSIST", "Failed to write %s", tmp.c_str());
+    Storage.remove(tmp.c_str());  // never leave a partial temporary behind
+    noteSaveFailure();
+    return false;
+  }
+
+  // rename() needs the destination gone. From here to the rename is the only
+  // window where the real file is absent, and the data is safe in the temporary
+  // throughout it.
+  if (Storage.exists(path) && !Storage.remove(path)) {
+    LOG_ERR("PERSIST", "Failed to replace %s", path);
+    noteSaveFailure();
+    return false;
+  }
+  if (!Storage.rename(tmp.c_str(), path)) {
+    LOG_ERR("PERSIST", "Wrote %s but could not move it into place — recover it by hand", tmp.c_str());
+    noteSaveFailure();
     return false;
   }
   return true;
@@ -34,6 +71,15 @@ bool PersistableStoreBase::readDocFromFile(const char* path, JsonDocument& doc, 
     if (attempt > 0) delay(SETTLE_MS);
 
     if (!Storage.exists(path)) {
+      // A save that got as far as writing its temporary but not as far as the
+      // rename left the new document there. Prefer it over falling back to
+      // defaults: it is the value the user last asked for.
+      std::string tmp(path);
+      tmp += ".tmp";
+      if (Storage.exists(tmp.c_str()) && Storage.rename(tmp.c_str(), path)) {
+        LOG_ERR("PERSIST", "Recovered %s from an interrupted save", path);
+        continue;
+      }
       // exists() is an SD read too, so it can be the thing that glitched. Only
       // the last pass is allowed to conclude the file is genuinely not there.
       if (attempt + 1 < ATTEMPTS) continue;
