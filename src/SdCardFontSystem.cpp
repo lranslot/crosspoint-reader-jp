@@ -32,6 +32,21 @@ void snapFontPointSizeTo(const uint8_t availablePointSize) {
 // clearSdFontFamily; see spec section 9.2). One failed SD read then permanently
 // forgets the user's CJK font, and every Japanese glyph is a tofu box until they
 // pick it again by hand. A transient read must not spend the user's settings.
+// Same reasoning as PersistableStoreBase::readDocFromFile: a .cpfont that fails
+// to load is usually a bad read, not a bad file, and the cost of believing the
+// first failure is that the user's Japanese font goes away. Each pass is a real
+// attempt; the first success returns.
+bool loadFamilyWithRetry(SdCardFontManager& manager, const SdCardFontFamilyInfo& family, GfxRenderer& renderer,
+                         const uint8_t pointSize) {
+  static constexpr int ATTEMPTS = 3;
+  for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (attempt > 0) delay(20);  // let the card settle, not a wait for readiness
+    if (manager.loadFamily(family, renderer, pointSize)) return true;
+    LOG_ERR("SDFS", "loadFamily failed [%d/%d]", attempt + 1, ATTEMPTS);
+  }
+  return false;
+}
+
 void keepSelectionForNextTry(const char* why, const char* family) {
   LOG_ERR("SDFS", "SD font unavailable (%s): %s - built-in font for now, selection kept", why, family);
 }
@@ -65,7 +80,7 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
   if (SETTINGS.sdFontFamilyName[0] != '\0') {
     const auto* family = registry_.findFamily(SETTINGS.sdFontFamilyName);
     if (family) {
-      if (manager_.loadFamily(*family, renderer, SETTINGS.fontPointSize)) {
+      if (loadFamilyWithRetry(manager_, *family, renderer, SETTINGS.fontPointSize)) {
         snapFontPointSizeTo(manager_.currentPointSize());
         setupUiFallbacks(renderer);
         LOG_DBG("SDFS", "Loaded SD card font family: %s", SETTINGS.sdFontFamilyName);
@@ -132,7 +147,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
 
   const auto* family = registry_.findFamily(wantedFamily);
   if (family) {
-    if (manager_.loadFamily(*family, renderer, SETTINGS.fontPointSize)) {
+    if (loadFamilyWithRetry(manager_, *family, renderer, SETTINGS.fontPointSize)) {
       snapFontPointSizeTo(manager_.currentPointSize());
       setupUiFallbacks(renderer);
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);

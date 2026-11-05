@@ -41,6 +41,10 @@ class PersistableStoreBase {
 
   bool resaveRequested = false;
 
+  // Set when the file was present but could not be read, cleared by the next
+  // successful load. Guards saveToFile(); see the comment there.
+  bool loadUnreadable = false;
+
  public:
   // Public so non-store JSON files (e.g. per-book bookmarks) can reuse them
   // instead of instantiating serializeJson/deserializeJson in their own TU —
@@ -49,9 +53,20 @@ class PersistableStoreBase {
   // Serializes doc and writes it to path (ensures /.crosspoint exists). Logs on failure.
   static bool writeDocToFile(const char* path, const JsonDocument& doc);
 
-  // Reads path and parses it into doc. Returns false silently when the file
-  // does not exist (expected on first boot); logs on read/parse failure.
-  static bool readDocFromFile(const char* path, JsonDocument& doc);
+  // Why a file could not be turned into a document.
+  //   Absent      nothing there. Ordinary on first boot.
+  //   Unreadable  the file IS there and we failed to get it. On this hardware
+  //               that is a transient SD read far more often than a corrupt
+  //               file, and it must not be mistaken for Absent: the difference
+  //               is "the user has no settings yet" versus "the user has
+  //               settings and we just lost sight of them".
+  enum class ReadFailure { None, Absent, Unreadable };
+
+  // Reads path and parses it into doc. Retries a few times before giving up —
+  // these files are a few hundred bytes and losing one costs the user every
+  // setting they have. Returns false silently when the file does not exist
+  // (expected on first boot); logs on read/parse failure. `why` reports which.
+  static bool readDocFromFile(const char* path, JsonDocument& doc, ReadFailure* why = nullptr);
 
  protected:
   /**
@@ -100,6 +115,20 @@ class PersistableStore : public PersistableStoreBase {
   }
 
   bool saveToFile() const {
+    // The in-memory document is all defaults when the load failed, and toJson()
+    // writes every field, so saving here replaces a file we know exists with
+    // defaults — turning one bad read into the permanent loss of every setting
+    // the user has. That is the chain behind "vertical writing keeps resetting":
+    // a failed read left verticalWriting at 0, and the next save made it stick.
+    //
+    // Cost of this guard: a genuinely corrupt file cannot be overwritten either,
+    // so settings stay unsaveable until it is removed. That is why the message
+    // names the file — deleting it on a PC restores a working first-boot state.
+    if (loadUnreadable) {
+      LOG_ERR("PERSIST", "Refusing to save %s: existing file unreadable, would overwrite it with defaults",
+              T::getFilePath());
+      return false;
+    }
     std::lock_guard<std::mutex> lock(storeMutex);
     JsonDocument doc;
     static_cast<const T*>(this)->toJson(doc);
@@ -113,9 +142,14 @@ class PersistableStore : public PersistableStoreBase {
       std::lock_guard<std::mutex> lock(storeMutex);
       resaveRequested = false;
       JsonDocument doc;
-      if (!readDocFromFile(T::getFilePath(), doc)) {
+      ReadFailure why = ReadFailure::None;
+      if (!readDocFromFile(T::getFilePath(), doc, &why)) {
+        // Absent leaves saving enabled: that really is first boot, and the
+        // defaults in memory are the right thing to write.
+        loadUnreadable = (why == ReadFailure::Unreadable);
         return false;
       }
+      loadUnreadable = false;
       ok = static_cast<T*>(this)->fromJson(doc.as<JsonVariantConst>());
       // Read the flag under the lock that guards the fromJson() that set it.
       doResave = resaveRequested;
