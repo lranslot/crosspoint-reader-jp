@@ -63,6 +63,31 @@ class TxtReaderActivity final : public Activity {
 
   bool isMarkdown = false;
 
+  // --- Ruby notation (Aozora .txt only) ---
+  // content.u8 carries `漢字《かんじ》` as written. It is removed from the text the
+  // wrap loop measures and the renderer draws, but never from the file: the
+  // reading position and the page index are byte offsets into content.u8, and a
+  // second byte stream for the other writing direction would make one number
+  // mean two places (F-5 completion condition 7).
+  //
+  // So a break position found in stripped coordinates has to be put back into
+  // file coordinates. What is remembered for that is the removals themselves,
+  // not a per-byte map: a line carries a handful of them, never hundreds.
+  struct RubySpan {
+    uint16_t displayAt;  // where the removal sits in the stripped line
+    uint16_t srcLen;     // bytes removed there
+  };
+  bool aozoraMarkup = false;
+  std::vector<RubySpan> rubySpans;
+
+  // Remove the ruby notation from `line` in place, recording each removal.
+  // Removes `《…》` whole, and the `｜` that marks where a base run starts.
+  static void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans);
+  // Offset within the source line that `displayOffset` names. A removal sitting
+  // exactly at the break is left for the next visual line rather than pulled
+  // back, so the notation always travels with the text that follows it.
+  static size_t toSourceOffset(size_t displayOffset, const std::vector<RubySpan>& spans);
+
   // --- Vertical writing (.txt only) ---
   // outLines keeps its meaning: one visual unit in reading order. Horizontally
   // that is a line, vertically a column. Only the rule for where to break

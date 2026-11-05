@@ -24,7 +24,9 @@ constexpr uint32_t ENCODING_MAGIC = 0x54584543;  // "TXEC"
 // for any Aozora file that uses them. Every offset derived from it moves with
 // it, which is why this is a version and not a setting: the page index and the
 // saved reading position are both byte offsets into this file.
-constexpr uint8_t ENCODING_VERSION = 4;
+// v5 keeps the ruby notation instead of removing it, so content.u8 grows and
+// every offset into it moves. The reader strips it at layout time.
+constexpr uint8_t ENCODING_VERSION = 5;
 }  // namespace
 
 Txt::Txt(std::string path, std::string cacheBasePath)
@@ -539,7 +541,7 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
   const int n =
       snprintf(buf, sizeof(buf),
                "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
-               "removed: ruby=%lu range=%lu note=%lu headerLines=%lu\n"
+               "kept: ruby=%lu range=%lu / removed: note=%lu headerLines=%lu\n"
                "gaiji: restored=%lu geta=%lu\n"
                "indent: lines=%lu ranges=%lu tooWide=%lu blanksAdded=%lu\n"
                "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "

@@ -19,6 +19,14 @@ class Txt {
 
   // Aozora Bunko markup removal, decided once in prepareEncoding().
   bool stripAozora = false;
+
+ public:
+  // Whether content.u8 was produced from an Aozora file, and so may carry the
+  // ruby notation the conversion deliberately leaves in. False for every other
+  // text file, where 《》 and ｜ are ordinary characters and must be shown.
+  [[nodiscard]] bool hasAozoraMarkup() const { return stripAozora; }
+
+ private:
   bool aozoraHeaderFound = false;
   size_t aozoraHeaderFirst = 0;
   size_t aozoraHeaderLast = 0;

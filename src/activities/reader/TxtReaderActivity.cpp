@@ -283,6 +283,10 @@ void TxtReaderActivity::initializeReader() {
   const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
   const int lineHeight = renderer.getLineHeight(cachedFontId);
 
+  // Only an Aozora conversion leaves the notation in content.u8. Every other
+  // text file means its 《》 literally.
+  aozoraMarkup = txt && txt->hasAozoraMarkup();
+
   isVertical = SETTINGS.verticalWriting != 0 && !isMarkdown;
   if (isVertical) {
     cellSize = renderer.getFullWidthAdvance(cachedFontId);
@@ -541,6 +545,59 @@ size_t TxtReaderActivity::advanceCodepoints(const char* text, const size_t len, 
   return i;
 }
 
+void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans) {
+  // 《 U+300A, 》 U+300B, ｜ U+FF5C — written as bytes so the encoding of this
+  // file cannot change what they mean.
+  static constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";
+  static constexpr char RUBY_CLOSE[] = "\xE3\x80\x8B";
+  static constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";
+  static constexpr size_t MARK_LEN = 3;
+
+  if (line.find(RUBY_OPEN) == std::string::npos && line.find(RANGE_MARK) == std::string::npos) {
+    return;  // the common line: nothing to do and nothing copied
+  }
+
+  std::string out;
+  out.reserve(line.size());
+  size_t i = 0;
+  while (i < line.size()) {
+    const size_t remain = line.size() - i;
+    if (remain >= MARK_LEN && memcmp(line.data() + i, RUBY_OPEN, MARK_LEN) == 0) {
+      const size_t close = line.find(RUBY_CLOSE, i + MARK_LEN);
+      // An unclosed 《 is not a ruby annotation. Left alone rather than swallowing
+      // the rest of the line, which is what a file using 《》 as quotation marks
+      // would otherwise lose.
+      if (close != std::string::npos) {
+        spans.push_back({static_cast<uint16_t>(out.size()), static_cast<uint16_t>(close + MARK_LEN - i)});
+        i = close + MARK_LEN;
+        continue;
+      }
+    } else if (remain >= MARK_LEN && memcmp(line.data() + i, RANGE_MARK, MARK_LEN) == 0) {
+      // ｜ only marks where the base run starts; it is never shown. On a line
+      // with no 《 it is an ordinary vertical bar, so it is only dropped when a
+      // ruby annotation follows it.
+      if (line.find(RUBY_OPEN, i + MARK_LEN) != std::string::npos) {
+        spans.push_back({static_cast<uint16_t>(out.size()), static_cast<uint16_t>(MARK_LEN)});
+        i += MARK_LEN;
+        continue;
+      }
+    }
+    out.push_back(line[i]);
+    i++;
+  }
+  line.swap(out);
+}
+
+size_t TxtReaderActivity::toSourceOffset(const size_t displayOffset, const std::vector<RubySpan>& spans) {
+  size_t src = displayOffset;
+  for (const auto& span : spans) {
+    // Recorded in order, so the first one at or past the break ends the walk.
+    if (span.displayAt >= displayOffset) break;
+    src += span.srcLen;
+  }
+  return src;
+}
+
 bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
                                          std::vector<CheckboxRef>* outCheckboxes) {
   outLines.clear();
@@ -603,6 +660,20 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
 
     // Extract line content for display (without CR/LF)
     std::string line(reinterpret_cast<char*>(buffer + pos), displayLen);
+
+    // Take the ruby notation out of what gets measured and drawn. Done before
+    // anything reads `line`, so the wrap loop never sees it and the page breaks
+    // land exactly where they did before the notation was kept (stage 2b's whole
+    // test). `displayLen` follows the stripped string from here on; the bytes
+    // removed are remembered so `pos` can be put back into file coordinates.
+    //
+    // .md is excluded with the same reasoning as everywhere else: it is a
+    // checklist, not something typeset, and its lines are never Aozora.
+    rubySpans.clear();
+    if (aozoraMarkup && !isMarkdown) {
+      stripRubyNotation(line, rubySpans);
+      displayLen = line.size();
+    }
 
     // Detect a task list marker before wrapping: the notation only ever appears
     // at the head of a source line, which is the first visual line it produces.
@@ -681,7 +752,8 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     } else {
       // Partially consumed - page is full mid-line
       // Move pos to where we stopped in the line (NOT past the line)
-      pos = pos + lineBytePos;
+      // lineBytePos counts stripped bytes; the file does not know about that.
+      pos = pos + toSourceOffset(lineBytePos, rubySpans);
       break;
     }
   }

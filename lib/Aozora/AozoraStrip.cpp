@@ -12,7 +12,6 @@ constexpr char KOME[] = "\xE2\x80\xBB";        // ※ U+203B
 constexpr char NOTE_OPEN[] = "\xEF\xBC\xBB\xEF\xBC\x83";  // ［＃ U+FF3B U+FF03
 constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";  // ］ U+FF3D
 constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";   // 《 U+300A
-constexpr char RUBY_CLOSE[] = "\xE3\x80\x8B";  // 》 U+300B
 constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";  // ｜ U+FF5C
 constexpr char GETA[] = "\xE3\x80\x93";        // 〓 U+3013
 
@@ -363,46 +362,26 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
       continue;
     }
 
-    // 3. Ruby: 《…》 — dropped entirely.
+    // 3 and 4. Ruby: 《…》 and its range marker ｜.
+    //
+    // Both are kept. They are counted here and then fall through to the ordinary
+    // text path, which copies them byte for byte into content.u8 — the reader
+    // removes them from what it lays out (TxtReaderActivity::loadPageAtOffset).
+    //
+    // Nothing is held back for the next chunk any more. Dropping a run needed its
+    // closing 》 to know how far to skip; copying it needs nothing beyond the byte
+    // in hand, so a run split across two chunks now costs no special case at all.
     if (matches(p, remain, RUBY_OPEN, RUBY_LEN)) {
-      bool hitNewline = false;
-      const size_t close = findInLine(p + RUBY_LEN, remain - RUBY_LEN, RUBY_CLOSE, RUBY_LEN, hitNewline);
-      if (close == std::string::npos) {
-        if (!hitNewline && !atEnd && remain < MAX_CARRY) {
-          carry_.assign(p, remain);
-          return carry_.size();
-        }
-        beginContent();
-        lineOut_.append(p, RUBY_LEN);
-        i += RUBY_LEN;
-        continue;
-      }
       stats_.ruby++;
-      i += RUBY_LEN + close + RUBY_LEN;
-      continue;
-    }
-
-    // 4. Ruby range marker: ｜ — only meaningful when a 《 follows on the same
-    // line. On its own it is an ordinary fullwidth vertical bar.
-    if (matches(p, remain, RANGE_MARK, RANGE_LEN)) {
-      bool hitNewline = false;
-      const size_t ruby = findInLine(p + RANGE_LEN, remain - RANGE_LEN, RUBY_OPEN, RUBY_LEN, hitNewline);
-      if (ruby == std::string::npos) {
-        if (!hitNewline && !atEnd && remain < MAX_CARRY) {
-          carry_.assign(p, remain);
-          return carry_.size();
-        }
-        beginContent();
-        lineOut_.append(p, RANGE_LEN);
-        i += RANGE_LEN;
-        continue;
-      }
+    } else if (matches(p, remain, RANGE_MARK, RANGE_LEN)) {
+      // Counted whether or not a 《 follows. On its own this is an ordinary
+      // fullwidth vertical bar, and the count is only ever read by the log.
       stats_.range++;
-      i += RANGE_LEN;
-      continue;
     }
 
-    // 5. Ordinary text. Note what is deliberately absent: ／＼ and ／″＼ (the
+    // 5. Ordinary text — which now includes the ruby notation counted above.
+    //
+    // Note what is deliberately absent: ／＼ and ／″＼ (the
     // repeat marks) are body text, not notation, and 〔…〕 (decomposed accented
     // Latin) is out of scope for phase 1. Neither is touched.
     beginContent();

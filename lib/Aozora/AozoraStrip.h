@@ -17,14 +17,17 @@
 // chunk boundary is held back internally and re-examined with the next chunk,
 // so callers do not need to align anything.
 //
-// The scan is deliberately a separate object rather than inline in the
-// conversion loop: phase 2 keeps ruby instead of dropping it, and will reuse
-// this exact traversal with a different exit.
+// Since stage 2a the ruby notation is kept: `漢字《かんじ》` reaches content.u8
+// intact, and the reader removes it from the text it lays out while keeping the
+// file offsets pointing at real bytes. Keeping one byte stream for both writing
+// directions is what makes a reading position survive a switch between them
+// (F-5 completion condition 7); a stream per direction would make one number
+// mean two places. See f8-ruby.md section 3.2.
 class AozoraStrip {
  public:
   struct Stats {
-    uint32_t ruby = 0;           // 《…》 removed
-    uint32_t range = 0;          // ｜ removed (ruby range marker)
+    uint32_t ruby = 0;           // 《…》 seen (kept since stage 2a, not removed)
+    uint32_t range = 0;          // ｜ seen (kept since stage 2a, not removed)
     uint32_t note = 0;           // ［＃…］ removed
     uint32_t gaijiRestored = 0;  // ※［＃…U+xxxx…］ replaced with that codepoint
     uint32_t gaijiGeta = 0;      // ※［＃…］ with no U+ replaced with 〓
