@@ -43,9 +43,33 @@ class TxtReaderActivity final : public Activity {
   // The "still indexing" popup costs a full-screen refresh (~1.7 s), so it is
   // shown once per open and the status bar's estimate carries the message after.
   bool loadingPopupShown = false;
+  // --- Per-line attributes (F-8 stage 2c) ---
+  // A line's height stopped being a constant, so what fits on a page is a budget
+  // in pixels rather than a count of lines. The attribute that moves the height
+  // travels beside the line: currentPageAttrs[i] belongs to currentPageLines[i].
+  //
+  // A struct rather than a bare bool because stage 2g adds the indent and the
+  // hanging indent here, and starting with a bool would mean rewriting every
+  // hand-off to widen it (f8-ruby.md section 7.2).
+  struct LineAttr {
+    bool hasRuby = false;  // a ruby strip is reserved, so this line is taller
+  };
   std::vector<std::string> currentPageLines;
-  int linesPerPage = 0;
+  std::vector<LineAttr> currentPageAttrs;
   int viewportWidth = 0;
+  int viewportHeight = 0;
+  // What one page holds, and what one line spends out of it. Horizontally the
+  // budget is the viewport's height and a line costs the font's line advance;
+  // vertically the budget is its width and a column costs the column pitch. One
+  // pair of names for both directions keeps the fill loop from asking which way
+  // the text runs — only the wrap rule still has to.
+  int pageExtent = 0;
+  int normalPitch = 0;
+  // What a line carrying ruby costs instead: max(normal pitch, em + ruby + 1).
+  // The max() is what makes a generous line spacing absorb the ruby for free
+  // rather than making ruby demand a generous line spacing (homework 2 —
+  // f8-ruby.md section 2.5). Equal to normalPitch when it is absorbed.
+  int rubyPitch = 0;
   bool initialized = false;
   // Set when an index cache existed but failed validation, i.e. a setting changed
   // under a book that had already been indexed. Distinguishes a rebuild from a
@@ -87,11 +111,20 @@ class TxtReaderActivity final : public Activity {
   // exactly at the break is left for the next visual line rather than pulled
   // back, so the notation always travels with the text that follows it.
   static size_t toSourceOffset(size_t displayOffset, const std::vector<RubySpan>& spans);
+  // Whether this visual line carries ruby, from the removals recorded for the
+  // source line it came from. A removal sitting exactly on the break belongs to
+  // the line that follows it, matching toSourceOffset(); the one case that has no
+  // line after it is a removal at the very end, which is why the last visual line
+  // of a source line takes that one too.
+  static bool lineCarriesRuby(const std::vector<RubySpan>& spans, size_t start, size_t end, bool isLastOfSourceLine);
+  // The height this line occupies, which is the only thing a page's capacity is
+  // measured in.
+  [[nodiscard]] int pitchOf(const LineAttr& attr) const { return attr.hasRuby ? rubyPitch : normalPitch; }
 
   // --- Vertical writing (.txt only) ---
   // outLines keeps its meaning: one visual unit in reading order. Horizontally
   // that is a line, vertically a column. Only the rule for where to break
-  // changes, and linesPerPage counts columns instead of lines.
+  // changes, and the page budget is spent across the width instead of the height.
   //
   // .md is always horizontal whatever the setting. It is a tool for checklists,
   // not something to read, so typesetting features do not apply to it (spec
@@ -143,6 +176,12 @@ class TxtReaderActivity final : public Activity {
   int cachedFontId = 0;
   uint8_t cachedScreenMargin = 0;
   uint8_t cachedParagraphAlignment = CrossPointSettings::LEFT_ALIGN;
+  // Also stamped into the page index. Since stage 2c the index records the
+  // settings it was built from and nothing it derived from them, so a new way of
+  // cutting pages cannot leave an input with nowhere to be stored (see
+  // f8-ruby.md section 5.5).
+  uint8_t cachedLineSpacing = 0;
+  uint8_t cachedVerticalWriting = 0;
   int cachedOrientedMarginTop = 0;
   int cachedOrientedMarginRight = 0;
   int cachedOrientedMarginBottom = 0;
@@ -155,12 +194,12 @@ class TxtReaderActivity final : public Activity {
   void initializeReader();
 #if READER_OPEN_DIAG
   // Appends one line to /reader-open.txt per book opened. [env:default] only.
-  void writeOpenDiagnostic(int viewportHeight) const;
+  void writeOpenDiagnostic() const;
 #endif
   // outCheckboxes is only passed by render(); buildPageIndex() sweeps every page
   // and must not pay for checkbox scanning.
-  bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
-                        std::vector<CheckboxRef>* outCheckboxes = nullptr);
+  bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, std::vector<LineAttr>* outAttrs,
+                        size_t& nextOffset, std::vector<CheckboxRef>* outCheckboxes = nullptr);
   void buildPageIndex();
   // Extend the index by at most maxPages. Returns true once it has reached the end.
   // Never loops back to the caller's caller: one call lays out a bounded number of

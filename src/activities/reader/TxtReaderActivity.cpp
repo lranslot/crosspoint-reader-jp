@@ -31,7 +31,11 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // algorithm, so any change to how lines are measured or broken must bump this or
 // stale pageOffsets are silently accepted.
 // v5: F-7 replaced the wrapping algorithm, which can move a break by one character.
-constexpr uint8_t CACHE_VERSION = 7;
+// v8 cuts pages by accumulated height instead of by a line count, so a page
+// carrying ruby holds fewer lines and every boundary after it moves. The header
+// changed shape with it: the fields are the settings the index was built from,
+// and no longer anything derived from them (f8-ruby.md section 5.5).
+constexpr uint8_t CACHE_VERSION = 8;
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -264,7 +268,7 @@ void TxtReaderActivity::loop() {
 // Appended, never truncated: the failure is intermittent, so a good open and a
 // bad one have to sit next to each other to be compared. Guarded by
 // READER_OPEN_DIAG, which only [env:default] defines.
-void TxtReaderActivity::writeOpenDiagnostic(const int viewportHeight) const {
+void TxtReaderActivity::writeOpenDiagnostic() const {
   HalFile file;
   if (!Storage.openFileForWrite("TRS", "/reader-open.txt", file)) {
     return;  // a diagnostic that cannot be written is not worth a failed open
@@ -285,7 +289,7 @@ void TxtReaderActivity::writeOpenDiagnostic(const int viewportHeight) const {
                          static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library",
                          isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
                          static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-",
-                         cachedFontId, viewportWidth, viewportHeight, linesPerPage, path.c_str());
+                         cachedFontId, viewportWidth, viewportHeight, pageExtent / normalPitch, path.c_str());
   if (n > 0) {
     file.write(line, std::min(static_cast<size_t>(n), sizeof(line) - 1));
   }
@@ -321,39 +325,58 @@ void TxtReaderActivity::initializeReader() {
   // afterwards. Its width is still measured from "> ": the box is sized to fit
   // whatever gutter that yields, which keeps viewportWidth unchanged from the
   // text-cursor era and so costs one cache generation less.
-  markerWidth = isMarkdown ? renderer.getTextAdvanceX(cachedFontId, "> ", EpdFontFamily::REGULAR) : 0;
-  viewportWidth -= markerWidth;
-  const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
-  const int lineHeight = renderer.getLineHeight(cachedFontId);
-
-  // Only an Aozora conversion leaves the notation in content.u8. Every other
-  // text file means its 《》 literally.
+  // Only an Aozora conversion leaves the notation in content.u8. Every other text
+  // file means its 《》 literally. Decided before the pitches below, which ask
+  // whether a line on this book can carry ruby at all.
   aozoraMarkup = txt && txt->hasAozoraMarkup();
 
+  markerWidth = isMarkdown ? renderer.getTextAdvanceX(cachedFontId, "> ", EpdFontFamily::REGULAR) : 0;
+  viewportWidth -= markerWidth;
+  viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
+  const int lineHeight = renderer.getLineHeight(cachedFontId);
+
+  cachedLineSpacing = SETTINGS.lineSpacing;
+  cachedVerticalWriting = SETTINGS.verticalWriting;
   isVertical = SETTINGS.verticalWriting != 0 && !isMarkdown;
+  // The em box, which is what a ruby strip is measured against. Taking it from
+  // the full-width advance rather than from the font's ascender is deliberate:
+  // the ascender is the rising box and runs about half again as tall, and
+  // reserving from it overshoots by more than a line (f8-ruby.md section 0.5).
+  cellSize = renderer.getFullWidthAdvance(cachedFontId);
+  if (cellSize < 1) cellSize = lineHeight;
   if (isVertical) {
-    cellSize = renderer.getFullWidthAdvance(cachedFontId);
-    if (cellSize < 1) cellSize = lineHeight;
     const size_t ratioIdx = (SETTINGS.lineSpacing < std::size(COLUMN_RATIO_PERCENT)) ? SETTINGS.lineSpacing : 1;
     columnWidth = cellSize * COLUMN_RATIO_PERCENT[ratioIdx] / 100;
     if (columnWidth < 1) columnWidth = 1;
-    // linesPerPage counts columns here. Reusing the field keeps the page index,
-    // the progress file and the status bar working without knowing which way
-    // the text runs.
-    linesPerPage = viewportWidth / columnWidth;
     charsPerUnit = viewportHeight / cellSize;
     if (charsPerUnit < 1) charsPerUnit = 1;
+    // Columns are laid out across the width, so that is the budget a page has
+    // to spend; a column costs its pitch.
+    pageExtent = viewportWidth;
+    normalPitch = columnWidth;
   } else {
-    cellSize = columnWidth = charsPerUnit = 0;
-    linesPerPage = viewportHeight / lineHeight;
+    columnWidth = charsPerUnit = 0;
+    pageExtent = viewportHeight;
+    normalPitch = lineHeight;
   }
-  if (linesPerPage < 1) linesPerPage = 1;
+  if (normalPitch < 1) normalPitch = 1;
 
-  LOG_DBG("TRS", "Viewport: %dx%d, %s per page: %d%s", viewportWidth, viewportHeight, isVertical ? "columns" : "lines",
-          linesPerPage, isVertical ? "" : " (horizontal)");
+  // A ruby glyph's own advance is half the em, rounded up: measured 13/15/17/19
+  // against em 25/29/33/37 across the four point sizes the fonts ship. Stage 2d
+  // replaces this with the ruby font's measured advance once there is one; if
+  // that disagrees, the page boundaries move and CACHE_VERSION moves with them.
+  const int rubyExtent = (cellSize + 1) / 2;
+  rubyPitch = std::max(normalPitch, cellSize + rubyExtent + 1);
+  // Only an Aozora .txt can carry ruby. Everything else keeps a constant pitch,
+  // which is the same arithmetic the line count used to be.
+  if (!aozoraMarkup || isMarkdown) rubyPitch = normalPitch;
+
+  LOG_DBG("TRS", "Viewport: %dx%d, %s per page: %d (pitch %d, ruby %d)%s", viewportWidth, viewportHeight,
+          isVertical ? "columns" : "lines", pageExtent / normalPitch, normalPitch, rubyPitch,
+          isVertical ? "" : " (horizontal)");
 
 #if READER_OPEN_DIAG
-  writeOpenDiagnostic(viewportHeight);
+  writeOpenDiagnostic();
 #endif
 
   // Try to load cached page index first
@@ -485,7 +508,7 @@ bool TxtReaderActivity::advanceIndex(const int maxPages) {
     std::vector<std::string> tempLines;
     size_t nextOffset = indexBuildOffset;
 
-    if (!loadPageAtOffset(indexBuildOffset, tempLines, nextOffset) || nextOffset <= indexBuildOffset) {
+    if (!loadPageAtOffset(indexBuildOffset, tempLines, nullptr, nextOffset) || nextOffset <= indexBuildOffset) {
       // Cannot read or cannot make progress: treat the index as finished here
       // rather than retrying forever.
       LOG_ERR("TRS", "Index build stopped at %zu of %zu", indexBuildOffset, fileSize);
@@ -645,10 +668,49 @@ size_t TxtReaderActivity::toSourceOffset(const size_t displayOffset, const std::
   return src;
 }
 
-bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset,
+bool TxtReaderActivity::lineCarriesRuby(const std::vector<RubySpan>& spans, const size_t start, const size_t end,
+                                        const bool isLastOfSourceLine) {
+  for (const auto& span : spans) {
+    if (span.displayAt >= start && span.displayAt < end) return true;
+    if (isLastOfSourceLine && span.displayAt == end) return true;
+  }
+  return false;
+}
+
+bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines,
+                                         std::vector<LineAttr>* outAttrs, size_t& nextOffset,
                                          std::vector<CheckboxRef>* outCheckboxes) {
   outLines.clear();
+  if (outAttrs) outAttrs->clear();
   if (outCheckboxes) outCheckboxes->clear();
+  // Attributes are kept here whether or not the caller wants them: they decide
+  // what the page holds, so buildPageIndex() has to spend the same budget
+  // render() does or the two disagree on where a page starts.
+  std::vector<LineAttr> attrs;
+  // How much of the page's budget has been spent. Replaces the line count: with
+  // every pitch equal it reaches exactly the old pageExtent / normalPitch lines,
+  // which is why keeping ruby out of a book changes nothing about its pages.
+  int usedExtent = 0;
+  bool pageFull = false;
+
+  // Admit one line of the given height, or report that the page is full. The
+  // first line of a page is always admitted: a pitch taller than the whole
+  // viewport must still make progress, or the reader stops at that line forever.
+  const auto admit = [&](const char* text, const size_t len, const LineAttr attr) {
+    const int pitch = pitchOf(attr);
+    if (!outLines.empty() && usedExtent + pitch > pageExtent) {
+      pageFull = true;
+      return false;
+    }
+    if (len == 0) {
+      outLines.emplace_back();
+    } else {
+      outLines.emplace_back(text, len);
+    }
+    attrs.push_back(attr);
+    usedExtent += pitch;
+    return true;
+  };
   const size_t fileSize = txt->getFileSize();
 
   if (offset >= fileSize) {
@@ -683,7 +745,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
   // Parse lines from buffer
   size_t pos = 0;
 
-  while (pos < chunkSize && static_cast<int>(outLines.size()) < linesPerPage) {
+  while (pos < chunkSize && !pageFull) {
     // Find end of line
     size_t lineEnd = pos;
     while (lineEnd < chunkSize && buffer[lineEnd] != '\n') {
@@ -758,7 +820,8 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // used to make a long paragraph quadratic in memcpy alone.
     do {
       if (displayLen == 0) {
-        outLines.emplace_back();
+        // A blank line spends a line's worth of the budget like any other.
+        admit(nullptr, 0, LineAttr{});
         break;
       }
 
@@ -772,17 +835,23 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
                             ? advanceCodepoints(segment, segmentLen, charsPerUnit)
                             : renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR);
 
-      if (breakPos >= segmentLen) {
-        outLines.emplace_back(segment, segmentLen);
+      // The ruby strip is reserved before the line is admitted, because what it
+      // costs is what decides whether it fits. Where the ruby was taken out is
+      // known from the removals recorded for this source line, so this is a walk
+      // over a handful of entries, not a second pass over the text.
+      const bool lastOfLine = breakPos >= segmentLen;
+      const size_t emitLen = lastOfLine ? segmentLen : (breakPos == 0 ? 1 : breakPos);
+      LineAttr attr;
+      attr.hasRuby = lineCarriesRuby(rubySpans, lineBytePos, lineBytePos + emitLen, lastOfLine);
+
+      if (lastOfLine) {
+        if (!admit(segment, segmentLen, attr)) break;
         lineBytePos = displayLen;  // Consumed entire display content
         break;
       }
 
-      if (breakPos == 0) {
-        breakPos = 1;  // always make progress, as the previous loop did
-      }
-
-      outLines.emplace_back(segment, breakPos);
+      breakPos = emitLen;  // never 0: the line has to make progress
+      if (!admit(segment, breakPos, attr)) break;
 
       // Skip space at break point
       size_t skipChars = breakPos;
@@ -790,20 +859,28 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
         skipChars++;
       }
       lineBytePos += skipChars;
-    } while (lineBytePos < displayLen && static_cast<int>(outLines.size()) < linesPerPage);
+    } while (lineBytePos < displayLen && !pageFull);
 
     // Determine how much of the source buffer we consumed
-    if (lineBytePos >= displayLen) {
-      // Fully consumed this source line, move past the newline
-      pos = lineEnd + 1;
-    } else {
-      // Partially consumed - page is full mid-line
-      // Move pos to where we stopped in the line (NOT past the line)
-      // lineBytePos counts stripped bytes; the file does not know about that.
-      pos = pos + toSourceOffset(lineBytePos, rubySpans);
+    if (pageFull) {
+      // Nothing from lineBytePos on was laid out, so that is where the next page
+      // starts. lineBytePos counts stripped bytes and the file does not know
+      // about that, hence the conversion back.
+      //
+      // Unless nothing of this line was laid out at all, in which case it goes to
+      // the next page whole and pos must not move: lineBytePos still sits at
+      // prefixLen, and walking pos past a task list notation would drop the
+      // checkbox from the line and leave toggleSelectedCheckbox() naming a byte
+      // that is no longer inside the brackets. A blank line that did not fit is
+      // the same case with prefixLen 0.
+      if (lineBytePos > prefixLen) pos = pos + toSourceOffset(lineBytePos, rubySpans);
       break;
     }
+    // Fully consumed this source line, move past the newline
+    pos = lineEnd + 1;
   }
+
+  if (outAttrs) *outAttrs = std::move(attrs);
 
   // Ensure we make progress even if calculations go wrong
   if (pos == 0 && !outLines.empty()) {
@@ -862,7 +939,9 @@ void TxtReaderActivity::render(RenderLock&&) {
   // Load current page content
   size_t nextOffset = currentOffset;
   currentPageLines.clear();
-  loadPageAtOffset(currentOffset, currentPageLines, nextOffset, isMarkdown ? &pageCheckboxes : nullptr);
+  currentPageAttrs.clear();
+  loadPageAtOffset(currentOffset, currentPageLines, &currentPageAttrs, nextOffset,
+                   isMarkdown ? &pageCheckboxes : nullptr);
   // Upholds the invariant on currentPageNextOffset: this is the only path that
   // draws a page, and paging forward reads this instead of the index.
   currentPageNextOffset = nextOffset;
@@ -913,6 +992,14 @@ void TxtReaderActivity::renderPage() {
     int y = cachedOrientedMarginTop;
     int lineIndex = 0;
     for (const auto& line : currentPageLines) {
+      // The ruby strip sits above the base line, so the extra height a ruby line
+      // was given is skipped before the text and not after it. With no ruby on
+      // the line this adds nothing and y walks by lineHeight exactly as before.
+      const LineAttr attr =
+          lineIndex < static_cast<int>(currentPageAttrs.size()) ? currentPageAttrs[lineIndex] : LineAttr{};
+      const int pitch = pitchOf(attr);
+      y += pitch - normalPitch;
+
       // Outside the empty-line guard below: a "- [ ]" with no text after it
       // still has a box to draw.
       if (drawBoxes) {
@@ -956,7 +1043,7 @@ void TxtReaderActivity::renderPage() {
 
         renderer.drawText(cachedFontId, x, y, line.c_str());
       }
-      y += lineHeight;
+      y += normalPitch;
       lineIndex++;
     }
   };
@@ -988,13 +1075,21 @@ void TxtReaderActivity::renderPageVertical(const int lineHeight) {
 
   auto renderColumns = [&]() {
     int columnIndex = 0;
+    int used = 0;  // how far in from the right edge the next column starts
     for (const auto& column : currentPageLines) {
+      const LineAttr attr =
+          columnIndex < static_cast<int>(currentPageAttrs.size()) ? currentPageAttrs[columnIndex] : LineAttr{};
+      const int pitch = pitchOf(attr);
       if (!column.empty()) {
-        // (columnIndex + 1) because x names the column's left edge and columns
-        // are laid out from the right.
-        const int x = contentRight - (columnIndex + 1) * columnWidth + (columnWidth - cellSize) / 2;
+        // Columns are laid out from the right, so `used` names this column's
+        // right edge and the cell sits at the left of its band: in vertical
+        // writing ruby goes to the right of the base character, which is the
+        // extra width a ruby column was given. With a constant pitch this is the
+        // old (columnIndex + 1) * columnWidth to the byte.
+        const int x = contentRight - used - pitch + (normalPitch - cellSize) / 2;
         renderer.drawTextVertical(cachedFontId, x, cachedOrientedMarginTop, cellSize, column.c_str());
       }
+      used += pitch;
       columnIndex++;
     }
   };
@@ -1170,11 +1265,20 @@ bool TxtReaderActivity::loadPageIndexCache() {
   // - uint8_t: cache version
   // - uint32_t: file size (to validate cache)
   // - int32_t: viewport width
-  // - int32_t: lines per page (columns per page when writing vertically)
-  // - int32_t: characters down one column (0 when writing horizontally)
+  // - int32_t: viewport height
   // - int32_t: font ID (to invalidate cache on font change)
   // - int32_t: screen margin (to invalidate cache on margin change)
   // - uint8_t: paragraph alignment (to invalidate cache on alignment change)
+  // - uint8_t: line spacing
+  // - uint8_t: vertical writing
+  //
+  // Every field is a setting the index was built from, and none is anything
+  // derived from them. The previous shape stored the line count and the
+  // characters per column, which held the viewport height folded inside them —
+  // and a fold has to be undone every time the way pages are cut changes, which
+  // is how stage 2c arrived with a height that had nowhere left to go for the
+  // second time. Inputs do not fold, so a later change to the way pages are cut
+  // leaves this list alone (f8-ruby.md section 5.5).
   // - uint32_t: total pages count
   // - N * uint32_t: page offsets
 
@@ -1217,23 +1321,10 @@ bool TxtReaderActivity::loadPageIndexCache() {
     return false;
   }
 
-  int32_t cachedLines;
-  serialization::readPod(f, cachedLines);
-  if (cachedLines != linesPerPage) {
-    LOG_DBG("TRS", "Cache lines per page mismatch, rebuilding");
-    return false;
-  }
-
-  // The two factors of a page's capacity. Horizontally viewportHeight is already
-  // folded into linesPerPage, so viewportWidth plus that pair covers everything
-  // that can move a page boundary. Vertically viewportWidth folds into the column
-  // count instead and the height has nowhere to go, so it is stored outright.
-  // Changing line spacing or the writing direction moves one of these two, which
-  // is why neither setting needs a field of its own.
-  int32_t cachedCharsPerUnit;
-  serialization::readPod(f, cachedCharsPerUnit);
-  if (cachedCharsPerUnit != charsPerUnit) {
-    LOG_DBG("TRS", "Cache chars per unit mismatch, rebuilding");
+  int32_t cachedHeight;
+  serialization::readPod(f, cachedHeight);
+  if (cachedHeight != viewportHeight) {
+    LOG_DBG("TRS", "Cache viewport height mismatch, rebuilding");
     return false;
   }
 
@@ -1255,6 +1346,20 @@ bool TxtReaderActivity::loadPageIndexCache() {
   serialization::readPod(f, alignment);
   if (alignment != cachedParagraphAlignment) {
     LOG_DBG("TRS", "Cache paragraph alignment mismatch, rebuilding");
+    return false;
+  }
+
+  uint8_t lineSpacing;
+  serialization::readPod(f, lineSpacing);
+  if (lineSpacing != cachedLineSpacing) {
+    LOG_DBG("TRS", "Cache line spacing mismatch, rebuilding");
+    return false;
+  }
+
+  uint8_t verticalWriting;
+  serialization::readPod(f, verticalWriting);
+  if (verticalWriting != cachedVerticalWriting) {
+    LOG_DBG("TRS", "Cache writing direction mismatch, rebuilding");
     return false;
   }
 
@@ -1290,11 +1395,12 @@ void TxtReaderActivity::savePageIndexCache() const {
   serialization::writePod(f, CACHE_VERSION);
   serialization::writePod(f, static_cast<uint32_t>(txt->getFileSize()));
   serialization::writePod(f, static_cast<int32_t>(viewportWidth));
-  serialization::writePod(f, static_cast<int32_t>(linesPerPage));
-  serialization::writePod(f, static_cast<int32_t>(charsPerUnit));
+  serialization::writePod(f, static_cast<int32_t>(viewportHeight));
   serialization::writePod(f, static_cast<int32_t>(cachedFontId));
   serialization::writePod(f, static_cast<int32_t>(cachedScreenMargin));
   serialization::writePod(f, cachedParagraphAlignment);
+  serialization::writePod(f, cachedLineSpacing);
+  serialization::writePod(f, cachedVerticalWriting);
   serialization::writePod(f, static_cast<uint32_t>(pageOffsets.size()));
 
   // Write page offsets
