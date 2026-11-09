@@ -109,6 +109,19 @@ class SdCardFont {
   void resetStats();
   const Stats& getStats() const { return stats_; }
 
+  // --- Transient failures on the per-glyph path ---
+  // A miss in onGlyphMiss() is drawn as a tofu box: EpdFont::getGlyph() falls
+  // back to REPLACEMENT_GLYPH when the handler returns nullptr. These count the
+  // boxes the reader would have shown (`failures`) and the ones a second attempt
+  // prevented (`retries`), so "is a retry enough, or is there a cause to chase"
+  // is answered by a number rather than by argument.
+  //
+  // Static and never reset: the question is about the card, not about one font
+  // object, and the reader prints the running totals in its open diagnostic, so
+  // the difference between two lines says what happened between two opens.
+  static uint32_t glyphRetries() { return glyphRetries_; }
+  static uint32_t glyphFailures() { return glyphFailures_; }
+
   // Content hash of the file header + style TOC entries (computed during load).
   // Used to generate deterministic font IDs for section cache invalidation.
   uint32_t contentHash() const { return contentHash_; }
@@ -254,6 +267,14 @@ class SdCardFont {
   OverflowEntry overflow_[OVERFLOW_CAPACITY] = {};
   uint32_t overflowCount_ = 0;
   uint32_t overflowNext_ = 0;
+
+  // One pass of the SD reads onGlyphMiss() needs: glyph metadata, and the bitmap
+  // when there is one. Split out so the attempt can simply be made again; the
+  // caller owns `bitmapOut` and frees it on a later failure.
+  static bool readGlyphFromCard(SdCardFont* self, const PerStyle& s, int32_t globalIdx, uint32_t codepoint,
+                                uint8_t styleIdx, EpdGlyph& glyphOut, uint8_t*& bitmapOut);
+  static uint32_t glyphRetries_;
+  static uint32_t glyphFailures_;
 
   // Compact advance-only table for layout measurement (per-style).
   // Built by buildAdvanceTable(), queried by getAdvance().

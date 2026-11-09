@@ -7,6 +7,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
+#include <SdCardFont.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -279,13 +280,17 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
   // Stack budget: one line, well under the 256-byte local limit. The path is
   // truncated rather than given its own allocation — what matters is the
   // extension and whether the string has anything odd on its tail.
+  // gr/gf are running totals for the session, not for this open: glyphs are read
+  // while the page is drawn, which is after this line is written. The difference
+  // between two consecutive lines is what happened between those two opens.
   char line[224];
-  const int n = snprintf(line, sizeof(line),
-                         "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d path=[%.60s]\n",
-                         static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library",
-                         isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
-                         static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-",
-                         cachedFontId, viewportWidth, viewportHeight, pageExtent / normalPitch, path.c_str());
+  const int n = snprintf(
+      line, sizeof(line),
+      "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u path=[%.60s]\n",
+      static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library", isMarkdown ? 1 : 0,
+      static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0, static_cast<unsigned>(path.size()),
+      wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId, viewportWidth, viewportHeight,
+      pageExtent / normalPitch, SdCardFont::glyphRetries(), SdCardFont::glyphFailures(), path.c_str());
   if (n <= 0) {
     return;
   }

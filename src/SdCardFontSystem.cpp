@@ -47,6 +47,26 @@ bool loadFamilyWithRetry(SdCardFontManager& manager, const SdCardFontFamilyInfo&
   return false;
 }
 
+// The UI fallback sizes go through the same card and fail the same way. Losing
+// one of these is quieter than losing the reader font — the UI falls back to a
+// Latin-only built-in and the menus show tofu — but it is the same transient
+// read, so it gets the same answer. Returns 0 when every attempt failed.
+//
+// Unlike the reader font, 0 here is also the ordinary answer for "this family
+// has no file at that size", and that case now pays the full retry: two extra
+// delays per missing size, ~40 ms, once per font load. Bounded and off the
+// reading path, which is why it is not worth a way to tell the two apart.
+int loadExtraSizeWithRetry(SdCardFontManager& manager, const SdCardFontFamilyInfo& family, GfxRenderer& renderer,
+                           const uint8_t pointSize) {
+  static constexpr int ATTEMPTS = 3;
+  for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+    if (attempt > 0) delay(20);  // let the card settle, not a wait for readiness
+    const int id = manager.loadFamilyExtraSize(family, renderer, pointSize);
+    if (id != 0) return id;
+  }
+  return 0;
+}
+
 void keepSelectionForNextTry(const char* why, const char* family) {
   LOG_ERR("SDFS", "SD font unavailable (%s): %s - built-in font for now, selection kept", why, family);
 }
@@ -186,7 +206,7 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   }
 
   for (const auto& ui : kUiFontSizes) {
-    const int sdFontId = manager_.loadFamilyExtraSize(*family, renderer, ui.pointSize);
+    const int sdFontId = loadExtraSizeWithRetry(manager_, *family, renderer, ui.pointSize);
     if (sdFontId != 0) {
       renderer.setFallbackFont(ui.fontId, sdFontId);
     } else {
