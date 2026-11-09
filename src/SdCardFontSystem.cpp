@@ -215,6 +215,19 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   }
 }
 
+int SdCardFontSystem::loadRubyFont(GfxRenderer& renderer, const uint8_t readerPointSize) {
+  const std::string& familyName = manager_.currentFamilyName();
+  if (familyName.empty()) return 0;
+  const auto* family = registry_.findFamily(familyName.c_str());
+  if (!family) return 0;
+
+  const uint8_t wanted = readerPointSize / 2;
+  const auto* file = family->findNearestSize(wanted);
+  if (!file) return 0;
+
+  return loadExtraSizeWithRetry(manager_, *family, renderer, file->pointSize);
+}
+
 int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*/) const {
   // The manager holds exactly one reader-size font, already selected for
   // SETTINGS.fontPointSize, so the size argument is implicit — always return

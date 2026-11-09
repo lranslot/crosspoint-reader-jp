@@ -53,6 +53,10 @@ class TxtReaderActivity final : public Activity {
   // hand-off to widen it (f8-ruby.md section 7.2).
   struct LineAttr {
     bool hasRuby = false;  // a ruby strip is reserved, so this line is taller
+    // Which of pageRuby belongs to this line. A count rather than a list: the
+    // entries for one line are contiguous because the page is filled in order.
+    uint16_t rubyFirst = 0;
+    uint8_t rubyCount = 0;
   };
   std::vector<std::string> currentPageLines;
   std::vector<LineAttr> currentPageAttrs;
@@ -63,6 +67,22 @@ class TxtReaderActivity final : public Activity {
   // vertically the budget is its width and a column costs the column pitch. One
   // pair of names for both directions keeps the fill loop from asking which way
   // the text runs — only the wrap rule still has to.
+  // --- Ruby placement for the page on screen (stages 2d/2e) ---
+  // Built only when a page is loaded to be shown. The index-building pass asks
+  // for no attributes and so pays none of this.
+  struct RubyDraw {
+    uint16_t at;        // parent run start, relative to this visual line's bytes
+    uint16_t textAt;    // ruby text: offset into pageRubyText
+    uint8_t parentLen;  // bytes of parent run on this line
+    uint8_t textLen;    // bytes of ruby text
+  };
+  std::vector<RubyDraw> pageRuby;
+  std::string pageRubyText;
+  // The font ruby is drawn in, and its em. 0 when the card has no SD family, in
+  // which case ruby is laid out for but not drawn — which is what stage 2c
+  // shipped and what a reader with a built-in Latin font still gets.
+  int rubyFontId = 0;
+  int rubyEm = 0;
   int pageExtent = 0;
   int normalPitch = 0;
   // What a line carrying ruby costs instead: max(normal pitch, em + ruby + 1).
@@ -100,13 +120,38 @@ class TxtReaderActivity final : public Activity {
   struct RubySpan {
     uint16_t displayAt;  // where the removal sits in the stripped line
     uint16_t srcLen;     // bytes removed there
+    // --- stage 2f: what the removal was, and what it belongs to ---
+    // The parent run is in the same stripped coordinates as displayAt and ends
+    // there. parentLen 0 means there is nothing to annotate — a `《》` at the
+    // start of a line, or one after a character that belongs to no run, such as
+    // `※《…》`. Both occur in real files; both must still be removed, so the
+    // span exists and only the drawing is skipped.
+    uint16_t parentAt = 0;
+    uint16_t textAt = 0;    // ruby text: offset into the line's rubyText pool
+    uint8_t parentLen = 0;  // bytes of parent run
+    uint8_t textLen = 0;    // bytes of ruby text; 0 for a bare `｜` removal
   };
   bool aozoraMarkup = false;
   std::vector<RubySpan> rubySpans;
+  // Every ruby string of the source line being laid out, packed end to end. One
+  // buffer rather than a string per span: a line carries a handful of
+  // annotations and each is a few bytes, so separate allocations would cost more
+  // in heap headers than in text.
+  std::string rubyText;
 
   // Remove the ruby notation from `line` in place, recording each removal.
   // Removes `《…》` whole, and the `｜` that marks where a base run starts.
-  static void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans);
+  static void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText);
+  // Where the parent run of an annotation at `end` begins, in `stripped`.
+  //
+  // Aozora names the parent either explicitly with `｜`, or implicitly as the
+  // run of one character class ending at the `《`. The explicit form is not
+  // redundant: `霧の｜ロンドン警視庁《スコットランドヤード》` crosses katakana
+  // into kanji, and the class scan alone would take only `警視庁`. Measured over
+  // the real corpus, every one of its 44 annotations is a kanji run of 1-4
+  // characters and `｜` is never needed there; the two cases that need it, and
+  // the two with no parent at all, come from the test file (f8-ruby.md 6.2).
+  static size_t rubyParentStart(const std::string& stripped, size_t end, size_t markerAt);
   // Offset within the source line that `displayOffset` names. A removal sitting
   // exactly at the break is left for the next visual line rather than pulled
   // back, so the notation always travels with the text that follows it.
@@ -120,6 +165,15 @@ class TxtReaderActivity final : public Activity {
   // The height this line occupies, which is the only thing a page's capacity is
   // measured in.
   [[nodiscard]] int pitchOf(const LineAttr& attr) const { return attr.hasRuby ? rubyPitch : normalPitch; }
+  // Copy the annotations covering [start, end) of the current source line into
+  // pageRuby, in the visual line's own coordinates, and point `attr` at them.
+  void collectRubyForLine(size_t start, size_t end, bool isLastOfSourceLine, LineAttr& attr);
+  // Ruby above the base run (horizontal) and to its right (vertical), centred on
+  // the parent. Measured overhang in the real corpus is at most half a character
+  // per side and no two annotations on a line collide, so centring needs no
+  // collision handling (f8-ruby.md 6.3).
+  void drawRubyHorizontal(const std::string& line, const LineAttr& attr, int lineX, int textTop);
+  void drawRubyVertical(const std::string& column, const LineAttr& attr, int cellX, int columnTop) const;
 
   // --- Vertical writing (.txt only) ---
   // outLines keeps its meaning: one visual unit in reading order. Horizontally

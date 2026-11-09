@@ -37,7 +37,9 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // carrying ruby holds fewer lines and every boundary after it moves. The header
 // changed shape with it: the fields are the settings the index was built from,
 // and no longer anything derived from them (f8-ruby.md section 5.5).
-constexpr uint8_t CACHE_VERSION = 8;
+// 9: the ruby strip is reserved from the ruby font's measured em rather than
+// from an estimate, which moves rubyPitch and so moves where pages break.
+constexpr uint8_t CACHE_VERSION = 9;
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -411,8 +413,16 @@ void TxtReaderActivity::initializeReader() {
   // against em 25/29/33/37 across the four point sizes the fonts ship. Stage 2d
   // replaces this with the ruby font's measured advance once there is one; if
   // that disagrees, the page boundaries move and CACHE_VERSION moves with them.
-  const int rubyExtent = (cellSize + 1) / 2;
-  rubyPitch = std::max(normalPitch, cellSize + rubyExtent + 1);
+  // Ruby is drawn in the installed size nearest half the reader size, because a
+  // family ships whole point sizes and nothing on the card is half of 12 or 14.
+  // The reserved strip is that font's own em, measured, not the (cell+1)/2 the
+  // design memo assumed: on the measured family the smallest file is 8 pt with a
+  // 16 px em, so a 14 pt reader reserves 46 px per ruby line, not 45. Reserving
+  // the assumed figure would have let every ruby strip overflow by a pixel.
+  rubyFontId = sdFontSystem.loadRubyFont(renderer, SETTINGS.fontPointSize);
+  rubyEm = rubyFontId ? renderer.getFullWidthAdvance(rubyFontId) : 0;
+  if (rubyEm < 1) rubyEm = (cellSize + 1) / 2;  // nothing to draw with; reserve the estimate
+  rubyPitch = std::max(normalPitch, cellSize + rubyEm + 1);
   // Only an Aozora .txt can carry ruby. Everything else keeps a constant pitch,
   // which is the same arithmetic the line count used to be.
   if (!aozoraMarkup || isMarkdown) rubyPitch = normalPitch;
@@ -661,7 +671,69 @@ size_t TxtReaderActivity::advanceCodepoints(const char* text, const size_t len, 
   return i;
 }
 
-void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans) {
+namespace {
+// The classes Aozora's implicit parent rule runs over. `Other` never forms a
+// run, which is what stops a scan at a comma, a space, or `※`.
+enum class RubyClass : uint8_t { Other, Kanji, Hiragana, Katakana, Alnum };
+
+RubyClass rubyClassOf(const uint32_t cp) {
+  if ((cp >= 0x4E00 && cp <= 0x9FFF) || cp == 0x3005 || cp == 0x3006 || cp == 0x30F6 ||
+      (cp >= 0xF900 && cp <= 0xFAFF)) {
+    return RubyClass::Kanji;
+  }
+  if (cp >= 0x3041 && cp <= 0x309F) return RubyClass::Hiragana;
+  if ((cp >= 0x30A1 && cp <= 0x30FA) || cp == 0x30FC || (cp >= 0xFF66 && cp <= 0xFF9F)) return RubyClass::Katakana;
+  if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) return RubyClass::Alnum;
+  if ((cp >= 0xFF10 && cp <= 0xFF19) || (cp >= 0xFF21 && cp <= 0xFF3A) || (cp >= 0xFF41 && cp <= 0xFF5A)) {
+    return RubyClass::Alnum;
+  }
+  return RubyClass::Other;
+}
+
+// Start of the UTF-8 character ending at `end`, i.e. step back one character.
+size_t utf8StepBack(const std::string& s, size_t end) {
+  if (end == 0) return 0;
+  size_t i = end - 1;
+  while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) i--;
+  return i;
+}
+
+// Characters, not bytes: a vertical column advances one cell per character.
+size_t countCodepoints(const std::string& s) {
+  size_t n = 0;
+  for (const char c : s) {
+    if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) n++;
+  }
+  return n;
+}
+
+uint32_t codepointAt(const std::string& s, const size_t at) {
+  const auto* p = reinterpret_cast<const unsigned char*>(s.data() + at);
+  return utf8NextCodepoint(&p);
+}
+}  // namespace
+
+size_t TxtReaderActivity::rubyParentStart(const std::string& stripped, const size_t end, const size_t markerAt) {
+  // An explicit `｜` wins outright: it exists precisely for the runs the class
+  // scan cannot find, and honouring the scan over it would silently shorten
+  // them. npos means there is no marker open for this annotation.
+  if (markerAt != std::string::npos && markerAt <= end) return markerAt;
+
+  if (end == 0) return end;
+  const size_t last = utf8StepBack(stripped, end);
+  const RubyClass want = rubyClassOf(codepointAt(stripped, last));
+  if (want == RubyClass::Other) return end;  // no run; the annotation has no parent
+
+  size_t start = last;
+  while (start > 0) {
+    const size_t prev = utf8StepBack(stripped, start);
+    if (rubyClassOf(codepointAt(stripped, prev)) != want) break;
+    start = prev;
+  }
+  return start;
+}
+
+void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText) {
   // 《 U+300A, 》 U+300B, ｜ U+FF5C — written as bytes so the encoding of this
   // file cannot change what they mean.
   static constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";
@@ -675,6 +747,10 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
 
   std::string out;
   out.reserve(line.size());
+  // Where the run named by an open `｜` starts, in stripped coordinates. Reset
+  // once an annotation has consumed it, so a stray marker earlier in the line
+  // cannot claim a later annotation's parent.
+  size_t markerAt = std::string::npos;
   size_t i = 0;
   while (i < line.size()) {
     const size_t remain = line.size() - i;
@@ -684,7 +760,22 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
       // the rest of the line, which is what a file using 《》 as quotation marks
       // would otherwise lose.
       if (close != std::string::npos) {
-        spans.push_back({static_cast<uint16_t>(out.size()), static_cast<uint16_t>(close + MARK_LEN - i)});
+        const size_t parentAt = rubyParentStart(out, out.size(), markerAt);
+        markerAt = std::string::npos;
+        const size_t textLen = close - (i + MARK_LEN);
+        RubySpan span{};
+        span.displayAt = static_cast<uint16_t>(out.size());
+        span.srcLen = static_cast<uint16_t>(close + MARK_LEN - i);
+        span.parentAt = static_cast<uint16_t>(parentAt);
+        // Clamped rather than widened: the longest parent measured in the real
+        // corpus is 4 characters and the longest ruby 10, so a byte holds both
+        // with room to spare, and a file that exceeds it is malformed enough
+        // that drawing a shortened annotation beats refusing the line.
+        span.parentLen = static_cast<uint8_t>(std::min<size_t>(out.size() - parentAt, 255));
+        span.textAt = static_cast<uint16_t>(rubyText.size());
+        span.textLen = static_cast<uint8_t>(std::min<size_t>(textLen, 255));
+        rubyText.append(line, i + MARK_LEN, span.textLen);
+        spans.push_back(span);
         i = close + MARK_LEN;
         continue;
       }
@@ -693,7 +784,12 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
       // with no 《 it is an ordinary vertical bar, so it is only dropped when a
       // ruby annotation follows it.
       if (line.find(RUBY_OPEN, i + MARK_LEN) != std::string::npos) {
-        spans.push_back({static_cast<uint16_t>(out.size()), static_cast<uint16_t>(MARK_LEN)});
+        RubySpan span{};
+        span.displayAt = static_cast<uint16_t>(out.size());
+        span.srcLen = static_cast<uint16_t>(MARK_LEN);
+        span.parentAt = span.displayAt;  // nothing to draw; kept for the offset map
+        spans.push_back(span);
+        markerAt = out.size();
         i += MARK_LEN;
         continue;
       }
@@ -712,6 +808,83 @@ size_t TxtReaderActivity::toSourceOffset(const size_t displayOffset, const std::
     src += span.srcLen;
   }
   return src;
+}
+
+void TxtReaderActivity::collectRubyForLine(const size_t start, const size_t end, const bool isLastOfSourceLine,
+                                           LineAttr& attr) {
+  attr.rubyFirst = static_cast<uint16_t>(pageRuby.size());
+  attr.rubyCount = 0;
+  for (const auto& span : rubySpans) {
+    if (span.textLen == 0 || span.parentLen == 0) {
+      continue;  // a bare `｜`, or an annotation with nothing to annotate
+    }
+    const bool mine =
+        (span.displayAt >= start && span.displayAt < end) || (isLastOfSourceLine && span.displayAt == end);
+    if (!mine) continue;
+
+    // A parent run can begin on the previous visual line when the wrap fell
+    // inside it. Only the part on this line is drawn over; the ruby still
+    // centres on what is visible, which is the best a line break allows.
+    const size_t from = std::max<size_t>(span.parentAt, start);
+    RubyDraw draw{};
+    draw.at = static_cast<uint16_t>(from - start);
+    draw.parentLen = static_cast<uint8_t>(span.displayAt - from);
+    draw.textAt = static_cast<uint16_t>(pageRubyText.size());
+    draw.textLen = span.textLen;
+    pageRubyText.append(rubyText, span.textAt, span.textLen);
+    pageRuby.push_back(draw);
+    attr.rubyCount++;
+  }
+}
+
+void TxtReaderActivity::drawRubyHorizontal(const std::string& line, const LineAttr& attr, const int lineX,
+                                           const int textTop) {
+  for (uint8_t k = 0; k < attr.rubyCount; k++) {
+    const RubyDraw& rd = pageRuby[attr.rubyFirst + k];
+    if (static_cast<size_t>(rd.at) + rd.parentLen > line.size()) continue;
+    const std::string parent(line, rd.at, rd.parentLen);
+    const std::string text(pageRubyText, rd.textAt, rd.textLen);
+    // getTextAdvanceX needs a null-terminated string, so the prefix is copied
+    // rather than viewed (CLAUDE.md, string_view at a C boundary).
+    const std::string prefix(line, 0, rd.at);
+    const int prefixW = rd.at ? renderer.getTextAdvanceX(cachedFontId, prefix.c_str(), EpdFontFamily::REGULAR) : 0;
+    const int parentW = renderer.getTextAdvanceX(cachedFontId, parent.c_str(), EpdFontFamily::REGULAR);
+    const int rubyW = renderer.getTextAdvanceX(rubyFontId, text.c_str(), EpdFontFamily::REGULAR);
+    // Same overhang, along the line this time: an annotation on the first or
+    // last word would otherwise start left of the margin or run past it.
+    const int left = cachedOrientedMarginLeft + markerWidth;
+    int x = lineX + prefixW + (parentW - rubyW) / 2;
+    const int rightmost = left + viewportWidth - rubyW;
+    if (x > rightmost) x = rightmost;
+    if (x < left) x = left;
+    renderer.drawText(rubyFontId, x, textTop - rubyEm - 1, text.c_str());
+  }
+}
+
+void TxtReaderActivity::drawRubyVertical(const std::string& column, const LineAttr& attr, const int cellX,
+                                         const int columnTop) const {
+  for (uint8_t k = 0; k < attr.rubyCount; k++) {
+    const RubyDraw& rd = pageRuby[attr.rubyFirst + k];
+    if (static_cast<size_t>(rd.at) + rd.parentLen > column.size()) continue;
+    const std::string parent(column, rd.at, rd.parentLen);
+    const std::string text(pageRubyText, rd.textAt, rd.textLen);
+    const std::string prefix(column, 0, rd.at);
+    // Vertical advance is a count of cells, not a sum of advances, so the
+    // position is a count of characters (same rule as advanceCodepoints).
+    const int before = static_cast<int>(countCodepoints(prefix));
+    const int parentChars = static_cast<int>(countCodepoints(parent));
+    const int rubyChars = static_cast<int>(countCodepoints(text));
+    int y = columnTop + before * cellSize + (parentChars * cellSize - rubyChars * rubyEm) / 2;
+    // A ruby run longer than its parent sticks out at both ends, and at the top
+    // or bottom of a column there is nothing to stick out into. On the boundary
+    // test file up to 68 px of a strip fell off the page. Pulled back inside
+    // rather than clipped: half a strip reads as a different word.
+    const int extent = rubyChars * rubyEm;
+    const int lowest = columnTop + viewportHeight - extent;
+    if (y > lowest) y = lowest;
+    if (y < columnTop) y = columnTop;
+    renderer.drawTextVertical(rubyFontId, cellX + cellSize + 1, y, rubyEm, text.c_str());
+  }
 }
 
 bool TxtReaderActivity::lineCarriesRuby(const std::vector<RubySpan>& spans, const size_t start, const size_t end,
@@ -733,6 +906,13 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
   // what the page holds, so buildPageIndex() has to spend the same budget
   // render() does or the two disagree on where a page starts.
   std::vector<LineAttr> attrs;
+  // Only the display load builds ruby placement; the index pass asks for no
+  // attributes and would pay for strings it never draws.
+  const bool wantRuby = outAttrs != nullptr && rubyFontId != 0;
+  if (wantRuby) {
+    pageRuby.clear();
+    pageRubyText.clear();
+  }
   // How much of the page's budget has been spent. Replaces the line count: with
   // every pitch equal it reaches exactly the old pageExtent / normalPitch lines,
   // which is why keeping ruby out of a book changes nothing about its pages.
@@ -825,8 +1005,9 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // .md is excluded with the same reasoning as everywhere else: it is a
     // checklist, not something typeset, and its lines are never Aozora.
     rubySpans.clear();
+    rubyText.clear();
     if (aozoraMarkup && !isMarkdown) {
-      stripRubyNotation(line, rubySpans);
+      stripRubyNotation(line, rubySpans, rubyText);
       displayLen = line.size();
     }
 
@@ -892,12 +1073,14 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
 
       if (lastOfLine) {
         if (!admit(segment, segmentLen, attr)) break;
+        if (wantRuby && attr.hasRuby) collectRubyForLine(lineBytePos, lineBytePos + segmentLen, true, attrs.back());
         lineBytePos = displayLen;  // Consumed entire display content
         break;
       }
 
       breakPos = emitLen;  // never 0: the line has to make progress
       if (!admit(segment, breakPos, attr)) break;
+      if (wantRuby && attr.hasRuby) collectRubyForLine(lineBytePos, lineBytePos + breakPos, false, attrs.back());
 
       // Skip space at break point
       size_t skipChars = breakPos;
@@ -1088,6 +1271,9 @@ void TxtReaderActivity::renderPage() {
         }
 
         renderer.drawText(cachedFontId, x, y, line.c_str());
+        // Drawn on the scan pass too: the ruby glyphs have to reach the prewarm
+        // set or every one of them falls through the on-demand path.
+        if (attr.rubyCount && rubyFontId) drawRubyHorizontal(line, attr, x, y);
       }
       y += normalPitch;
       lineIndex++;
@@ -1132,8 +1318,14 @@ void TxtReaderActivity::renderPageVertical(const int lineHeight) {
         // writing ruby goes to the right of the base character, which is the
         // extra width a ruby column was given. With a constant pitch this is the
         // old (columnIndex + 1) * columnWidth to the byte.
-        const int x = contentRight - used - pitch + (normalPitch - cellSize) / 2;
+        // The band holds the base cell, and on a ruby column the ruby strip to
+        // its right as well; the group is centred in the band. With no ruby
+        // anywhere this is (normalPitch - cellSize) / 2 to the byte, which is
+        // what stage 2c placed.
+        const int groupWidth = attr.hasRuby ? cellSize + 1 + rubyEm : cellSize;
+        const int x = contentRight - used - pitch + (pitch - groupWidth) / 2;
         renderer.drawTextVertical(cachedFontId, x, cachedOrientedMarginTop, cellSize, column.c_str());
+        if (attr.rubyCount && rubyFontId) drawRubyVertical(column, attr, x, cachedOrientedMarginTop);
       }
       used += pitch;
       columnIndex++;

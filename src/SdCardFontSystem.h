@@ -59,6 +59,22 @@ class SdCardFontSystem {
   // loaded are reused).
   void setupUiFallbacks(GfxRenderer& renderer);
 
+ public:
+  /// Font id to draw ruby with, for a reader running at `readerPointSize`.
+  ///
+  /// Ruby is set at half the body size by convention, but a family ships whole
+  /// point sizes and nothing on the card is half of 12 or 14. The installed size
+  /// nearest half the reader size is used instead (findNearestSize, ties to the
+  /// smaller), which on a 8/10/12/14/16/18 family is the 8 pt file for every
+  /// reader size it offers: 64% of the body at 12 pt, 43% at 18 pt, rather than
+  /// the 50% the notation assumes.
+  ///
+  /// Reuses an already-loaded size when there is one, so this is free whenever
+  /// the choice lands on a UI fallback size. Returns 0 when no SD family is
+  /// loaded or nothing could be read, in which case no ruby is drawn.
+  int loadRubyFont(GfxRenderer& renderer, uint8_t readerPointSize);
+
+ private:
   SdCardFontRegistry registry_;
   SdCardFontManager manager_;
   std::atomic<bool> registryDirty_{false};
