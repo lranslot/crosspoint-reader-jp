@@ -6,6 +6,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Memory.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -265,17 +266,12 @@ void TxtReaderActivity::loop() {
 // the path they were derived from, and the font state is printed beside them
 // because the tofu appears at the same time.
 //
-// Appended, never truncated: the failure is intermittent, so a good open and a
-// bad one have to sit next to each other to be compared. Guarded by
+// Accumulated, never truncated: the failure is intermittent, so a good open and
+// a bad one have to sit next to each other to be compared. Guarded by
 // READER_OPEN_DIAG, which only [env:default] defines.
 void TxtReaderActivity::writeOpenDiagnostic() const {
-  HalFile file;
-  if (!Storage.openFileForWrite("TRS", "/reader-open.txt", file)) {
-    return;  // a diagnostic that cannot be written is not worth a failed open
-  }
-  // openFileForWrite() starts at 0; seek past the existing bytes to append.
-  file.seek(file.size());
-
+  // Format first: nothing already on the card is disturbed until there is a new
+  // line worth keeping.
   const std::string& path = txt->getPath();
   const char* wanted = SETTINGS.sdFontFamilyName;
   const char* loaded = sdFontSystem.loadedFamilyName();
@@ -290,9 +286,54 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
                          isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
                          static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-",
                          cachedFontId, viewportWidth, viewportHeight, pageExtent / normalPitch, path.c_str());
-  if (n > 0) {
-    file.write(line, std::min(static_cast<size_t>(n), sizeof(line) - 1));
+  if (n <= 0) {
+    return;
   }
+  const size_t lineLen = std::min(static_cast<size_t>(n), sizeof(line) - 1);
+
+  // There is no append-mode open. SDCardManager::openFileForWrite() passes
+  // O_TRUNC, so size() is 0 the moment the file is open and seeking to it lands
+  // at the start: every open overwrote the previous line, and the file only ever
+  // held the last book opened. Read what is there, then write it back ahead of
+  // the new line. A handful of lines fits in one buffer; past the cap the oldest
+  // lines are dropped, because the newest open is the one being diagnosed.
+  static constexpr size_t KEEP_BYTES = 3072;
+  const auto kept = makeUniqueNoThrow<char[]>(KEEP_BYTES);
+  size_t keptLen = 0;
+  size_t keptFrom = 0;
+  if (kept) {
+    HalFile in;
+    if (Storage.openFileForRead("TRS", "/reader-open.txt", in)) {
+      const size_t existing = in.size();
+      const size_t from = existing > KEEP_BYTES ? existing - KEEP_BYTES : 0;
+      if (from == 0 || in.seekSet(from)) {
+        const int got = in.read(kept.get(), existing - from);
+        if (got > 0) {
+          keptLen = static_cast<size_t>(got);
+        }
+      }
+      if (from > 0) {
+        // The cut landed mid-line; drop the fragment so the file stays readable
+        // line by line.
+        while (keptFrom < keptLen && kept[keptFrom] != '\n') {
+          keptFrom++;
+        }
+        if (keptFrom < keptLen) {
+          keptFrom++;
+        }
+      }
+      in.close();  // must close before reopening the same path for write
+    }
+  }
+
+  HalFile file;
+  if (!Storage.openFileForWrite("TRS", "/reader-open.txt", file)) {
+    return;  // a diagnostic that cannot be written is not worth a failed open
+  }
+  if (keptLen > keptFrom) {
+    file.write(kept.get() + keptFrom, keptLen - keptFrom);
+  }
+  file.write(line, lineLen);
   // Consume the flag: only the book the boot opened by itself gets "boot".
   APP_STATE.bootOpenedReader = false;
 }
