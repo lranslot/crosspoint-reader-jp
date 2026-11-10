@@ -561,7 +561,7 @@ C++ への写しの正しさ / viewport の実寸 / 索引の読み書き往復�
 |---|---|---|
 | 列の帯からはみ出す | **0** | **0** |
 | 頁の上に出る | 0 | 0（クランプ前 6） |
-| 頁の下に出る | 0（クランプ前 2） | 0（**クランプ前 18、最大 68px**） |
+| 頁の下に出る | 0（クランプ前 **3**） | 0（**クランプ前 18、最大 72px**） |
 | 隣のルビと重なる | **0** | **0** |
 | いちばん詰まった間隔 | 11 px | 22 px |
 
@@ -651,7 +651,8 @@ C++ への写しの正しさ / viewport の実寸 / 索引の読み書き往復�
 | ~~5~~ | ~~**C-2（`BY_SCREEN`）**~~ | **完了 (2026-11-02)**。実機検証 全 8 項目合格。眠る閾値 1200 ms も妥当 |
 | **6** | **縦書きで読んでみて、段階2（禁則・縦中横）とルビの要否を判断** | — |
 | ~~7~~ | ~~**F-8 段階2 ルビ**~~ | **完了 (2026-11-10)**。2a〜2f、焼き 4 回で実機合格。完了条件 10 項目すべて |
-| **7.5** | **F-8 段階2g — 字下げを行の属性にする（ぶら下げ）** | **次。**100〜140行 / `ENCODING_VERSION` 5 → 6。§7.1 / §7.2 |
+| ~~**7.5**~~ | ~~F-8 段階2g — 字下げを行の属性にする（ぶら下げ）~~ | ✅ **完了 (2026-11-10)。**`ENCODING_VERSION` 5 → **6**、`CACHE_VERSION` 9 → **10**。`MAX_RANGE_INDENT = 2` は撤廃し、切り詰めを読み手に移した。ぶら下げ（`折り返してM字下げ`）を実装 ── 『戦争史大観』で **17 件**が生きた。対照実験（字下げ 0 で旧実装と全文一致）は 4 ファイルすべて合格。**実機未検証。**→ [f8-aozora-notation.md §5.5-8](f8-aozora-notation.md) |
+| **8** | **実機で 2g を確認する** | **次。**七の三の試験行（行単位の字下げ / 字下げ+ルビ / ぶら下げ 1→3 / 範囲の外 / 19字下げの切り詰め）を 4 方向で見る。`.crosspoint/` を消して開き直す必要がある（版が 2 つ上がっている） |
 | 8 | **F-8 傍点（圏点）** | **ルビ実装後に約60〜80行。**ルビの領域確保の仕組みを流用する。いまは段階1 で黙って捨てられている |
 | — | Phase B（フォント焼き込み）→ E（配布） | **保留**。配布の唯一のブロッカー |
 | — | `wrappedText` の上流 PR | **別件。**ベースが410件遅れており現行 develop の上で書き直しが必要。上流 HEAD #4126 が同じ場所を触っている |
@@ -742,6 +743,91 @@ python scripts/bmp_to_png.py G:/screenshots <出力先>
 | # | 内容 | なぜ知りたいか |
 |---|---|---|
 | **0** | ★ **復帰時に横書きで開く間欠バグ** | **段階2 の完了後に残っている唯一の未解決。**`open=boot` のログが **1 行も取れていない**（3 行すべて `open=library`）ので、失敗した回の状態がまだ 1 度も記録できていない。`vw=0` が 1 本出れば確定し、`open=boot` が 10 本すべて `vw=1` なら撤去する（→ 上の「起動時の設定消失」） |
+
+#### 0 の続き — ★ `open=boot` が出る条件をコードから確定した (2026-11-10)
+
+**経過時間は関係ない。**「30 分以上放置して深い眠りに落とす」という
+以前の手順案は誤りで、分岐に時刻を読む箇所は 1 つも無い。
+
+**(1) `open=boot` が書かれる条件。**診断行の `open=` は
+`APP_STATE.bootOpenedReader` 1 つで決まる
+（[TxtReaderActivity.cpp:292](../src/activities/reader/TxtReaderActivity.cpp)）。
+これを立てるのは [main.cpp](../src/main.cpp) の 2 箇所だけである。
+
+```cpp
+// main.cpp:420-423 — 設定変更などで「リーダーに戻る」静かな再起動
+} else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
+           !APP_STATE.openEpubPath.empty()) {
+  APP_STATE.bootOpenedReader = true;
+
+// main.cpp:429-440 — 復帰経路。直前の else if の否定が条件
+} else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
+           mappedInputManager.isPressed(MappedInputManager::Button::Back) ||
+           APP_STATE.readerActivityLoadCount > 0) {
+  activityManager.goHome();
+} else {
+  ...
+  APP_STATE.bootOpenedReader = true;
+}
+```
+
+つまり復帰経路の条件は、**本が開いたまま保存されていて
+（`openEpubPath` が空でない）、直前の眠りがリーダーからで
+（`lastSleepFromReader`）、戻るボタンを押していなくて、
+前回のリーダーが落ちていない（`readerActivityLoadCount == 0`）**こと。
+加えて `recoveryFirmwareMode` でも panic 再起動でもないこと。
+
+**(2) QuickResume と Splash の分岐。**判定材料は
+**保存された状態ファイル**（`CrossPointState`、`saveToFile()`）の
+`showBootScreen` 1 つである。RTC メモリでも SD 上の別ファイルでも
+GPIO でもない。
+
+```cpp
+// main.cpp:370-372
+const BootResume resume = isSilentReboot              ? BootResume::Silent
+                          : !APP_STATE.showBootScreen ? BootResume::QuickResume
+                                                      : BootResume::Splash;
+```
+
+`showBootScreen` は眠りに入るときに `!isQuickResumeSleep` が入り、
+`isQuickResumeSleep` は `SETTINGS.sleepScreen == QUICK_RESUME`、
+または（自動スリープのとき）`quickResumeSleepScreen == QUICK_RESUME_AFTER_TIMEOUT`
+で決まる（[main.cpp:199-203](../src/main.cpp)）。
+
+> **ここが肝心 ── この分岐は `open=` に影響しない。**
+> QuickResume も Splash も、同じ経路 (main.cpp:412-442) に落ちてくる。
+> **羅闇さんは QuickResume を使っていなくても `open=boot` を出せる。**
+
+**(3) 経過時間。**影響**しない。**分岐のどこにも時刻の比較が無い。
+時間が関わるのは自動スリープの発火
+（`SETTINGS.getSleepTimeoutMs()`、既定 10 分）だけで、それが決めるのは
+`fromTimeout` → 上の `isQuickResumeSleep`、つまり **(2) の方**であって
+`open=` ではない。
+
+**(4) X3 と X4。**`gpio.deviceIsX3()` が出てくるのは
+[main.cpp:389](../src/main.cpp)（QuickResume の描き直しを差分更新にするか）と
+[HalPowerManager.cpp:69-78](../lib/hal/HalPowerManager.cpp)（X4 だけ GPIO13 を
+落としてバッテリラッチを切る）の 2 箇所だけで、**経路の分岐は同一**である。
+X4 は電池駆動なら本当に電源が切れるが、`APP_STATE` はファイルなので
+**電源が落ちても復帰経路は同じように通る。**
+
+#### `open=boot` を確実に通す操作手順（待ち時間なし、3 手）
+
+| 手 | 操作 | 画面に出るもの |
+|---|---|---|
+| 1 | 本棚から `.txt` の本を開く | 本文。`/reader-open.txt` に `open=library` が 1 行増える |
+| 2 | **リーダー画面のまま**電源ボタンを 1.5 秒以上長押し（`SETTINGS.getPowerButtonSleepHoldMs()` は既定 1200ms。「短押しでスリープ」設定なら一瞬で足りる） | スリープ画面（しおり／月）。ここで `lastSleepFromReader = true` と `openEpubPath` が保存される |
+| 3 | 電源ボタンを押して復帰 | **本棚を通らずに本文が出る。**この回の書き込みが `open=boot` |
+
+**待つ必要はない。**手 2 と手 3 の間隔は 0 秒でよい。
+
+焼き直し直後の初回も取るなら、手 2 まで済ませてから
+USB を抜く（電池駆動なら本当に電源が切れる）→ 電源ボタンで起動。
+`APP_STATE` はファイルなので手 3 と同じ経路を通り、
+**冷間起動での `open=boot` が 1 本取れる。**
+
+**3 行すべてが `open=library` だったのは、手 2 を踏んでいないからである。**
+本棚から選んで開けば必ず `open=library` になる。
 | 1 | **ルビの水平位置** | EPUB のルビが親文字に対しやや左寄りに見える箇所があった。他でも同傾向か。F-8 段階2 の精度に関わる |
 | 2 | **実機の空きヒープ**（`ESP.getFreeHeap()`） | `OVERFLOW_CAPACITY` 128 の実コストが未計測 |
 | 3 | **#2813**（中国語書籍で ToC / 章移動が使えない） | 日本語でも起きるか |
