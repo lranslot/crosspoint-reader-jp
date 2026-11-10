@@ -17,6 +17,11 @@
 // chunk boundary is held back internally and re-examined with the next chunk,
 // so callers do not need to align anything.
 //
+// Since stage 2h the emphasis notation is kept the same way: ［＃「○○」に傍点］
+// reaches content.u8 and the reader turns it into dots. Only the form that names
+// its own parent is kept — the ［＃傍点］…［＃傍点終わり］ range form appears nowhere
+// in the corpus or the test file, so it is counted and dropped as before.
+//
 // Since stage 2a the ruby notation is kept: `漢字《かんじ》` reaches content.u8
 // intact, and the reader removes it from the text it lays out while keeping the
 // file offsets pointing at real bytes. Keeping one byte stream for both writing
@@ -36,6 +41,8 @@ class AozoraStrip {
     uint32_t indentRanges = 0;   // ［＃ここからN字下げ］ ranges applied
     uint32_t indentHanging = 0;  // 、折り返してM字下げ — ranges that also set a hanging indent
     uint32_t blanksAdded = 0;    // blank lines inserted around block headings
+    uint32_t bouten = 0;         // ［＃「…」に…傍点］ kept, for the reader to draw
+    uint32_t boutenRange = 0;    // ［＃傍点］…［＃傍点終わり］ — unsupported, still dropped
   };
 
   // Widest indent the notation is allowed to ask for. The cap that used to live

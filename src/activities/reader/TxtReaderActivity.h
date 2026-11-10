@@ -67,6 +67,15 @@ class TxtReaderActivity final : public Activity {
     // The hanging indent itself belongs to the source line and never outlives
     // the loop that applies it. See docs-jp/f8-aozora-notation.md section 5.5-8.
     uint8_t indent = 0;
+    // --- A7: emphasis dots ---
+    // Separate from hasRuby rather than folded into it, because the two reserve
+    // different amounts: ruby needs a whole face's em, a dot needs a quarter of
+    // one. A line with both is a ruby line — jlreq-d 7.6.2 would move the dots
+    // outside the ruby, which is a wider band than either, and we draw no dots
+    // there at all (f8-ruby.md 6.1, option 2), so the ruby band is what it costs.
+    bool hasBouten = false;
+    uint16_t boutenFirst = 0;
+    uint8_t boutenCount = 0;
   };
   std::vector<std::string> currentPageLines;
   std::vector<LineAttr> currentPageAttrs;
@@ -88,6 +97,12 @@ class TxtReaderActivity final : public Activity {
   };
   std::vector<RubyDraw> pageRuby;
   std::string pageRubyText;
+  struct BoutenDraw {
+    uint16_t at;        // run start, relative to this visual line's bytes
+    uint8_t parentLen;  // bytes of it on this line
+    bool hollow;
+  };
+  std::vector<BoutenDraw> pageBouten;
   // The font ruby is drawn in, and its em. Both 0 when the card has no SD family,
   // in which case no band is reserved either: nothing can be drawn there, and
   // reserving the space anyway cost such a reader lines for nothing (stage 2c
@@ -110,6 +125,21 @@ class TxtReaderActivity final : public Activity {
   // is cellSize + rubyEm + dotBand + 2 along the axis that already has a band,
   // and nothing on the other side of the character. See f8-ruby.md section 6.1.
   int rubyPitch = 0;
+  // A7. The mark is hand-drawn, so its size is ours to choose rather than a
+  // font's to dictate: U+FE45 ﹅, the proper vertical sesame dot, is in none of
+  // the six installed sizes. cellSize / 4 is what the table is cut for and what
+  // the pitch below is measured against — at that size the band is absorbed by
+  // the normal line spacing at every point size, so a page of emphasised text
+  // costs nothing (f8-ruby.md 6.1 (c)).
+  int boutenDot = 0;
+  int boutenPitch = 0;
+  // Counted per open and written to the diagnostic line, because serial output
+  // does not reach this device's user. A variant we approximate and a dot we
+  // refused to draw are both things we only learn about from a real book.
+  uint16_t boutenDrawn = 0;
+  uint16_t boutenVariant = 0;   // a kind beyond the two shapes we cut
+  uint16_t boutenCollide = 0;   // ruby on the same characters, so no dots
+  uint16_t boutenNoParent = 0;  // the quoted string was not there to match
   bool initialized = false;
   // Set when an index cache existed but failed validation, i.e. a setting changed
   // under a book that had already been indexed. Distinguishes a rebuild from a
@@ -151,8 +181,18 @@ class TxtReaderActivity final : public Activity {
     uint8_t parentLen = 0;  // bytes of parent run
     uint8_t textLen = 0;    // bytes of ruby text; 0 for a bare `｜` removal
   };
+  // One ［＃「…」に…傍点］ removed from the source line. The note names its own
+  // parent, so unlike ruby there is no class scan: the run is whatever the
+  // quoted string matched, immediately before the note.
+  struct BoutenSpan {
+    uint16_t displayAt;     // where the note sat, i.e. the end of the parent run
+    uint16_t parentAt = 0;  // start of the run, same stripped coordinates
+    uint8_t parentLen = 0;  // bytes of it; 0 when the quoted string did not match
+    bool hollow = false;    // 白丸 / 白ゴマ and the rest of the white kinds
+  };
   bool aozoraMarkup = false;
   std::vector<RubySpan> rubySpans;
+  std::vector<BoutenSpan> boutenSpans;
   // Every ruby string of the source line being laid out, packed end to end. One
   // buffer rather than a string per span: a line carries a handful of
   // annotations and each is a few bytes, so separate allocations would cost more
@@ -160,8 +200,16 @@ class TxtReaderActivity final : public Activity {
   std::string rubyText;
 
   // Remove the ruby notation from `line` in place, recording each removal.
-  // Removes `《…》` whole, and the `｜` that marks where a base run starts.
-  static void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText);
+  // Removes `《…》` whole, the `｜` that marks where a base run starts, and
+  // ［＃「…」に…傍点］ with it.
+  //
+  // One pass and not two, because every removal's displayAt has to be in final
+  // stripped coordinates for toSourceOffset() to add up: a second pass would
+  // record its own offsets in coordinates the first pass's entries no longer
+  // agree with. A bouten note also pushes a RubySpan, with no text and no
+  // parent, purely so those bytes are counted there.
+  void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText,
+                         std::vector<BoutenSpan>& bouten);
 
   // Read the indent marker AozoraStrip writes at the head of an indented line —
   // ［＃N字下げ］ or ［＃N字下げ、折り返してM字下げ］ — and return how many bytes it
@@ -200,7 +248,10 @@ class TxtReaderActivity final : public Activity {
   static bool lineCarriesRuby(const std::vector<RubySpan>& spans, size_t start, size_t end, bool isLastOfSourceLine);
   // The height this line occupies, which is the only thing a page's capacity is
   // measured in.
-  [[nodiscard]] int pitchOf(const LineAttr& attr) const { return attr.hasRuby ? rubyPitch : normalPitch; }
+  [[nodiscard]] int pitchOf(const LineAttr& attr) const {
+    if (attr.hasRuby) return rubyPitch;
+    return attr.hasBouten ? boutenPitch : normalPitch;
+  }
   // Copy the annotations covering [start, end) of the current source line into
   // pageRuby, in the visual line's own coordinates, and point `attr` at them.
   void collectRubyForLine(size_t start, size_t end, bool isLastOfSourceLine, LineAttr& attr);
@@ -210,6 +261,17 @@ class TxtReaderActivity final : public Activity {
   // collision handling (f8-ruby.md 6.3).
   void drawRubyHorizontal(const std::string& line, const LineAttr& attr, int lineX, int textTop);
   void drawRubyVertical(const std::string& column, const LineAttr& attr, int cellX, int columnTop) const;
+
+  // --- A7: emphasis dots ---
+  // Same shape as the ruby pair above. A dot is drawn per character of the run,
+  // not once per run: that is what an emphasis mark means.
+  static bool lineCarriesBouten(const std::vector<BoutenSpan>& spans, size_t start, size_t end,
+                                bool isLastOfSourceLine);
+  void collectBoutenForLine(size_t start, size_t end, bool isLastOfSourceLine, LineAttr& attr);
+  void drawBoutenHorizontal(const std::string& line, const LineAttr& attr, int lineX, int textTop) const;
+  void drawBoutenVertical(const std::string& column, const LineAttr& attr, int cellX, int columnTop) const;
+  // One mark, from the bitmap table, with its top-left corner at (left, top).
+  void drawBoutenMark(int left, int top, bool hollow) const;
 
   // --- Vertical writing (.txt only) ---
   // outLines keeps its meaning: one visual unit in reading order. Horizontally

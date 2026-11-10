@@ -39,7 +39,43 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // and no longer anything derived from them (f8-ruby.md section 5.5).
 // 9: the ruby strip is reserved from the ruby font's measured em rather than
 // from an estimate, which moves rubyPitch and so moves where pages break.
-constexpr uint8_t CACHE_VERSION = 10;
+// 10: an indent is a line attribute and spends cells out of the line's budget.
+// 11: a line carrying emphasis dots reserves a band for them (A7).
+constexpr uint8_t CACHE_VERSION = 11;
+
+// --- A7: the emphasis marks, cut by hand ---
+//
+// U+FE45 ﹅ and U+FE46 ﹆, the proper sesame dots, are in none of the six
+// installed .cpfont sizes, and the substitutes that are there (U+30FB, U+25E6)
+// advance a full em with a 10-11 px left bearing, so the mark would sit in the
+// middle of a cell-wide box we would then have to reserve. Drawing the mark
+// ourselves costs a table and buys the right to choose its size, which is what
+// makes the band fit inside the ordinary line spacing.
+//
+// Cut by hand rather than generated: a midpoint circle at these diameters comes
+// out lopsided, one row 4 px wide and the next 2, and these are read at about
+// 157 dpi. Bit 0 is the leftmost pixel of a row. Generated-from and checked
+// against the mock in docs-jp/f8-ruby.md section 6.2.
+constexpr int BOUTEN_MIN_SIZE = 3;
+constexpr int BOUTEN_MAX_SIZE = 9;
+constexpr uint16_t BOUTEN_FILLED[][9] = {
+    {0x002, 0x007, 0x002, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000},  // 3 px
+    {0x006, 0x00F, 0x00F, 0x006, 0x000, 0x000, 0x000, 0x000, 0x000},  // 4 px
+    {0x00E, 0x01F, 0x01F, 0x01F, 0x00E, 0x000, 0x000, 0x000, 0x000},  // 5 px
+    {0x01E, 0x03F, 0x03F, 0x03F, 0x03F, 0x01E, 0x000, 0x000, 0x000},  // 6 px
+    {0x01C, 0x03E, 0x07F, 0x07F, 0x07F, 0x03E, 0x01C, 0x000, 0x000},  // 7 px
+    {0x03C, 0x07E, 0x0FF, 0x0FF, 0x0FF, 0x0FF, 0x07E, 0x03C, 0x000},  // 8 px
+    {0x07C, 0x0FE, 0x1FF, 0x1FF, 0x1FF, 0x1FF, 0x1FF, 0x0FE, 0x07C},  // 9 px
+};
+constexpr uint16_t BOUTEN_HOLLOW[][9] = {
+    {0x002, 0x005, 0x002, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000},  // 3 px
+    {0x006, 0x009, 0x009, 0x006, 0x000, 0x000, 0x000, 0x000, 0x000},  // 4 px
+    {0x00E, 0x011, 0x011, 0x011, 0x00E, 0x000, 0x000, 0x000, 0x000},  // 5 px
+    {0x01E, 0x021, 0x021, 0x021, 0x021, 0x01E, 0x000, 0x000, 0x000},  // 6 px
+    {0x01C, 0x022, 0x041, 0x041, 0x041, 0x022, 0x01C, 0x000, 0x000},  // 7 px
+    {0x03C, 0x042, 0x081, 0x081, 0x081, 0x081, 0x042, 0x03C, 0x000},  // 8 px
+    {0x07C, 0x082, 0x101, 0x101, 0x101, 0x101, 0x101, 0x082, 0x07C},  // 9 px
+};
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -286,13 +322,15 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
   // while the page is drawn, which is after this line is written. The difference
   // between two consecutive lines is what happened between those two opens.
   char line[224];
-  const int n = snprintf(
-      line, sizeof(line),
-      "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u path=[%.60s]\n",
-      static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library", isMarkdown ? 1 : 0,
-      static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0, static_cast<unsigned>(path.size()),
-      wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId, viewportWidth, viewportHeight,
-      pageExtent / normalPitch, SdCardFont::glyphRetries(), SdCardFont::glyphFailures(), path.c_str());
+  const int n =
+      snprintf(line, sizeof(line),
+               "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u bt=%u/%u/%u/%u "
+               "path=[%.60s]\n",
+               static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library",
+               isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
+               static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId,
+               viewportWidth, viewportHeight, pageExtent / normalPitch, SdCardFont::glyphRetries(),
+               SdCardFont::glyphFailures(), boutenDrawn, boutenVariant, boutenCollide, boutenNoParent, path.c_str());
   if (n <= 0) {
     return;
   }
@@ -435,9 +473,22 @@ void TxtReaderActivity::initializeReader() {
   rubyEm = rubyFontId ? renderer.getFullWidthAdvance(rubyFontId) : 0;
   if (rubyEm < 1) rubyEm = 0;
   rubyPitch = rubyEm > 0 ? std::max(normalPitch, cellSize + rubyEm + 1) : normalPitch;
+
+  // A7. A quarter of the em, which is the largest mark that still disappears
+  // into the ordinary line spacing: cellSize + cellSize/4 + 1 comes to 32/37/42/48
+  // against a normal pitch of 32/37/42/49 at 12/14/16/18 pt, so a page of
+  // emphasised text holds exactly as many lines as a page without it. Only the
+  // tight spacing pays, 4-5 px per emphasised line. Nothing is read from a font
+  // here — the marks are drawn from a table, so this works on a card with no
+  // Japanese family at all, unlike ruby.
+  boutenDot = std::max(BOUTEN_MIN_SIZE, std::min(BOUTEN_MAX_SIZE, cellSize / 4));
+  boutenPitch = std::max(normalPitch, cellSize + boutenDot + 1);
   // Only an Aozora .txt can carry ruby. Everything else keeps a constant pitch,
   // which is the same arithmetic the line count used to be.
-  if (!aozoraMarkup || isMarkdown) rubyPitch = normalPitch;
+  if (!aozoraMarkup || isMarkdown) {
+    rubyPitch = normalPitch;
+    boutenPitch = normalPitch;
+  }
 
   LOG_DBG("TRS", "Viewport: %dx%d, %s per page: %d (pitch %d, ruby %d)%s", viewportWidth, viewportHeight,
           isVertical ? "columns" : "lines", pageExtent / normalPitch, normalPitch, rubyPitch,
@@ -745,15 +796,88 @@ size_t TxtReaderActivity::rubyParentStart(const std::string& stripped, const siz
   return start;
 }
 
-void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText) {
+// Does `kind` name one of the two shapes the table actually cuts? 丸 and ゴマ
+// are drawn as themselves; 三角, 二重丸, 蛇の目 and ばつ come out as the disc or
+// the ring on their own side of the black/white split, and are counted so a book
+// using one is heard from rather than silently approximated.
+namespace {
+constexpr char BOUTEN_MARU[] = "\xE4\xB8\xB8";              // 丸
+constexpr char BOUTEN_GOMA[] = "\xE3\x82\xB4\xE3\x83\x9E";  // ゴマ
+
+bool boutenKindIsExact(const char* kind, const size_t len) {
+  size_t at = 0;
+  if (len >= 3 && memcmp(kind, "\xE7\x99\xBD", 3) == 0)
+    at = 3;  // 白
+  else if (len >= 3 && memcmp(kind, "\xE9\xBB\x92", 3) == 0)
+    at = 3;  // 黒
+  const size_t rest = len - at;
+  return (rest == 3 && memcmp(kind + at, BOUTEN_MARU, 3) == 0) || (rest == 6 && memcmp(kind + at, BOUTEN_GOMA, 6) == 0);
+}
+
+// ［＃「X」に<kind>傍点］. Returns false for every other annotation, which is what
+// leaves the indent marker — also an annotation — in the line to be read as a
+// prefix further down.
+struct BoutenNote {
+  size_t quotedAt = 0;
+  size_t quotedLen = 0;
+  bool hollow = false;
+  bool approximated = false;
+};
+
+bool parseBoutenNote(const char* body, const size_t len, BoutenNote& out) {
+  static constexpr char KAGI_OPEN[] = "\xE3\x80\x8C";           // 「
+  static constexpr char KAGI_CLOSE[] = "\xE3\x80\x8D";          // 」
+  static constexpr char NI[] = "\xE3\x81\xAB";                  // に
+  static constexpr char BOUTEN[] = "\xE5\x82\x8D\xE7\x82\xB9";  // 傍点
+  static constexpr char SHIRO[] = "\xE7\x99\xBD";               // 白
+  static constexpr size_t CH = 3;
+  static constexpr size_t BOUTEN_LEN = 6;
+
+  if (len < CH * 3 + BOUTEN_LEN) return false;
+  if (memcmp(body, KAGI_OPEN, CH) != 0) return false;
+  // The first 」 ends the quoted run, which is the rule the notation's own
+  // grammar uses; a quoted run containing one is a malformed file.
+  size_t closeAt = CH;
+  while (closeAt + CH <= len && memcmp(body + closeAt, KAGI_CLOSE, CH) != 0) closeAt++;
+  if (closeAt + CH > len) return false;
+  const size_t quotedLen = closeAt - CH;
+  size_t at = closeAt + CH;
+  if (at + CH > len || memcmp(body + at, NI, CH) != 0) return false;
+  at += CH;
+  const size_t kindAt = at;
+  if (len < BOUTEN_LEN || len - BOUTEN_LEN < kindAt) return false;
+  if (memcmp(body + len - BOUTEN_LEN, BOUTEN, BOUTEN_LEN) != 0) {
+    return false;  // ［＃「…」に傍線］ and the rest: not ours, and not removed
+  }
+  const size_t kindLen = len - BOUTEN_LEN - kindAt;
+  out.quotedAt = CH;
+  out.quotedLen = quotedLen;
+  out.hollow = false;
+  for (size_t k = 0; k + CH <= kindLen; k++) {
+    if (memcmp(body + kindAt + k, SHIRO, CH) == 0) {
+      out.hollow = true;
+      break;
+    }
+  }
+  out.approximated = kindLen > 0 && !boutenKindIsExact(body + kindAt, kindLen);
+  return true;
+}
+}  // namespace
+
+void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText,
+                                          std::vector<BoutenSpan>& bouten) {
   // 《 U+300A, 》 U+300B, ｜ U+FF5C — written as bytes so the encoding of this
   // file cannot change what they mean.
   static constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";
   static constexpr char RUBY_CLOSE[] = "\xE3\x80\x8B";
   static constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";
+  static constexpr char NOTE_OPEN[] = "\xEF\xBC\xBB\xEF\xBC\x83";  // ［＃
+  static constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";             // ］
   static constexpr size_t MARK_LEN = 3;
+  static constexpr size_t NOTE_OPEN_LEN = 6;
 
-  if (line.find(RUBY_OPEN) == std::string::npos && line.find(RANGE_MARK) == std::string::npos) {
+  if (line.find(RUBY_OPEN) == std::string::npos && line.find(RANGE_MARK) == std::string::npos &&
+      line.find(NOTE_OPEN) == std::string::npos) {
     return;  // the common line: nothing to do and nothing copied
   }
 
@@ -789,6 +913,42 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
         rubyText.append(line, i + MARK_LEN, span.textLen);
         spans.push_back(span);
         i = close + MARK_LEN;
+        continue;
+      }
+    } else if (remain >= NOTE_OPEN_LEN && memcmp(line.data() + i, NOTE_OPEN, NOTE_OPEN_LEN) == 0) {
+      const size_t close = line.find(NOTE_CLOSE, i + NOTE_OPEN_LEN);
+      BoutenNote note;
+      if (close != std::string::npos &&
+          parseBoutenNote(line.data() + i + NOTE_OPEN_LEN, close - (i + NOTE_OPEN_LEN), note)) {
+        const size_t noteLen = close + MARK_LEN - i;
+        // Recorded in the offset map as well, with no text and no parent, so the
+        // bytes it occupies are counted there and the page index keeps naming
+        // real file offsets.
+        RubySpan skip{};
+        skip.displayAt = static_cast<uint16_t>(out.size());
+        skip.srcLen = static_cast<uint16_t>(noteLen);
+        skip.parentAt = skip.displayAt;
+        spans.push_back(skip);
+
+        BoutenSpan span{};
+        span.displayAt = static_cast<uint16_t>(out.size());
+        span.hollow = note.hollow;
+        // The note names its own parent, so the run is matched rather than
+        // scanned for by character class: it is those bytes, immediately before
+        // the note. All 126 notes in the corpus and the test file matched; one
+        // that does not is left undrawn rather than guessed at, because a guess
+        // would emphasise the wrong word.
+        const char* quoted = line.data() + i + NOTE_OPEN_LEN + note.quotedAt;
+        if (note.quotedLen > 0 && note.quotedLen <= 255 && out.size() >= note.quotedLen &&
+            memcmp(out.data() + out.size() - note.quotedLen, quoted, note.quotedLen) == 0) {
+          span.parentAt = static_cast<uint16_t>(out.size() - note.quotedLen);
+          span.parentLen = static_cast<uint8_t>(note.quotedLen);
+        } else {
+          boutenNoParent++;
+        }
+        if (note.approximated) boutenVariant++;
+        bouten.push_back(span);
+        i += noteLen;
         continue;
       }
     } else if (remain >= MARK_LEN && memcmp(line.data() + i, RANGE_MARK, MARK_LEN) == 0) {
@@ -899,6 +1059,121 @@ void TxtReaderActivity::drawRubyVertical(const std::string& column, const LineAt
   }
 }
 
+bool TxtReaderActivity::lineCarriesBouten(const std::vector<BoutenSpan>& spans, const size_t start, const size_t end,
+                                          const bool isLastOfSourceLine) {
+  for (const auto& span : spans) {
+    if (span.parentLen == 0) continue;
+    // The run, not the note, is what has to be on this line: unlike ruby the
+    // note sits after its parent, so a wrap between them would otherwise leave
+    // the dots on the line that has none of the characters they belong to.
+    const size_t from = span.parentAt;
+    const size_t to = span.displayAt;
+    if (from < end && to > start) return true;
+    if (isLastOfSourceLine && from == end) return true;
+  }
+  return false;
+}
+
+void TxtReaderActivity::collectBoutenForLine(const size_t start, const size_t end, const bool isLastOfSourceLine,
+                                             LineAttr& attr) {
+  attr.boutenFirst = static_cast<uint16_t>(pageBouten.size());
+  attr.boutenCount = 0;
+  for (const auto& span : boutenSpans) {
+    if (span.parentLen == 0) continue;
+    const size_t from = std::max<size_t>(span.parentAt, start);
+    const size_t to = std::min<size_t>(span.displayAt, end);
+    const bool mine = (span.parentAt < end && span.displayAt > start) || (isLastOfSourceLine && span.parentAt == end);
+    if (!mine || to <= from) continue;
+
+    // Ruby wins the band. jlreq-d 7.6.2 would put the dots outside the ruby, on
+    // the same side; that is a wider band than either and a page model change on
+    // top of this one, so for now the dots are dropped and counted instead
+    // (f8-ruby.md 6.1, option 2). Measured over the corpus and the test file no
+    // character carries both, so this costs nothing that is written today.
+    bool underRuby = false;
+    for (const auto& ruby : rubySpans) {
+      if (ruby.textLen == 0 || ruby.parentLen == 0) continue;
+      if (ruby.parentAt<to&& static_cast<size_t>(ruby.displayAt)> from) {
+        underRuby = true;
+        break;
+      }
+    }
+    if (underRuby) {
+      boutenCollide++;
+      continue;
+    }
+
+    BoutenDraw draw{};
+    draw.at = static_cast<uint16_t>(from - start);
+    draw.parentLen = static_cast<uint8_t>(to - from);
+    draw.hollow = span.hollow;
+    pageBouten.push_back(draw);
+    attr.boutenCount++;
+    boutenDrawn++;
+  }
+}
+
+void TxtReaderActivity::drawBoutenMark(const int left, const int top, const bool hollow) const {
+  // The page is rendered twice, once to collect the glyphs it needs and once to
+  // draw. A mark needs no glyph, so it has nothing to contribute to the first
+  // pass, and drawPixel is a raw primitive that the scan does not hold back the
+  // way it holds back text — it would paint for real, twice. Guarded here rather
+  // than at each call so both writing directions behave the same way. Same
+  // reasoning as GfxRenderer::drawLeaderDots.
+  const auto* fcm = renderer.getFontCacheManager();
+  if (fcm != nullptr && fcm->isScanning()) return;
+  if (boutenDot < BOUTEN_MIN_SIZE || boutenDot > BOUTEN_MAX_SIZE) return;
+  const uint16_t* rows = (hollow ? BOUTEN_HOLLOW : BOUTEN_FILLED)[boutenDot - BOUTEN_MIN_SIZE];
+  for (int y = 0; y < boutenDot; y++) {
+    const uint16_t bits = rows[y];
+    if (bits == 0) continue;
+    for (int x = 0; x < boutenDot; x++) {
+      if (bits & (1u << x)) renderer.drawPixel(left + x, top + y);
+    }
+  }
+}
+
+void TxtReaderActivity::drawBoutenHorizontal(const std::string& line, const LineAttr& attr, const int lineX,
+                                             const int textTop) const {
+  for (uint8_t k = 0; k < attr.boutenCount; k++) {
+    const BoutenDraw& bd = pageBouten[attr.boutenFirst + k];
+    if (static_cast<size_t>(bd.at) + bd.parentLen > line.size()) continue;
+    const int top = textTop - boutenDot - 1;
+    // One mark per character, which is what an emphasis mark means: a run of
+    // four characters is four dots, not one dot over the middle of the word.
+    size_t at = bd.at;
+    const size_t runEnd = static_cast<size_t>(bd.at) + bd.parentLen;
+    while (at < runEnd) {
+      size_t next = at + 1;
+      while (next < runEnd && (static_cast<unsigned char>(line[next]) & 0xC0) == 0x80) next++;
+      const std::string prefix(line, 0, at);
+      const std::string glyph(line, at, next - at);
+      const int prefixW = at ? renderer.getTextAdvanceX(cachedFontId, prefix.c_str(), EpdFontFamily::REGULAR) : 0;
+      const int glyphW = renderer.getTextAdvanceX(cachedFontId, glyph.c_str(), EpdFontFamily::REGULAR);
+      drawBoutenMark(lineX + prefixW + (glyphW - boutenDot) / 2, top, bd.hollow);
+      at = next;
+    }
+  }
+}
+
+void TxtReaderActivity::drawBoutenVertical(const std::string& column, const LineAttr& attr, const int cellX,
+                                           const int columnTop) const {
+  for (uint8_t k = 0; k < attr.boutenCount; k++) {
+    const BoutenDraw& bd = pageBouten[attr.boutenFirst + k];
+    if (static_cast<size_t>(bd.at) + bd.parentLen > column.size()) continue;
+    const std::string prefix(column, 0, bd.at);
+    const std::string run(column, bd.at, bd.parentLen);
+    // Cells, not advances: a vertical line steps one cell per character
+    // whatever the glyph measures (same rule as advanceCodepoints).
+    const int before = static_cast<int>(countCodepoints(prefix));
+    const int chars = static_cast<int>(countCodepoints(run));
+    const int left = cellX + cellSize + 1;
+    for (int c = 0; c < chars; c++) {
+      drawBoutenMark(left, columnTop + (before + c) * cellSize + (cellSize - boutenDot) / 2, bd.hollow);
+    }
+  }
+}
+
 size_t TxtReaderActivity::parseIndentNotation(const std::string& line, uint8_t& indent, uint8_t& hanging) {
   // ［＃ U+FF3B U+FF03, ］ U+FF3D, 字下げ, 、折り返して — bytes, not literals, so the
   // encoding of this file cannot change what they mean. Must stay the spelling
@@ -983,9 +1258,13 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
   // Only the display load builds ruby placement; the index pass asks for no
   // attributes and would pay for strings it never draws.
   const bool wantRuby = outAttrs != nullptr && rubyFontId != 0;
+  // No font is needed to draw a dot, so unlike ruby this does not depend on the
+  // card carrying a Japanese family.
+  const bool wantBouten = outAttrs != nullptr;
   if (wantRuby) {
     pageRuby.clear();
     pageRubyText.clear();
+    pageBouten.clear();
   }
   // How much of the page's budget has been spent. Replaces the line count: with
   // every pitch equal it reaches exactly the old pageExtent / normalPitch lines,
@@ -1080,11 +1359,12 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // checklist, not something typeset, and its lines are never Aozora.
     rubySpans.clear();
     rubyText.clear();
+    boutenSpans.clear();
     size_t prefixLen = 0;
     int firstIndent = 0;
     int hangIndent = 0;
     if (aozoraMarkup && !isMarkdown) {
-      stripRubyNotation(line, rubySpans, rubyText);
+      stripRubyNotation(line, rubySpans, rubyText, boutenSpans);
       displayLen = line.size();
 
       // Stage 2g: the indent arrives as the notation at the head of the line, and
@@ -1169,11 +1449,15 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       const size_t emitLen = lastOfLine ? segmentLen : (breakPos == 0 ? 1 : breakPos);
       LineAttr attr;
       attr.hasRuby = lineCarriesRuby(rubySpans, lineBytePos, lineBytePos + emitLen, lastOfLine);
+      // Only when there is no ruby: a line with both reserves the ruby band, and
+      // the dots on it are dropped rather than drawn into it.
+      attr.hasBouten = !attr.hasRuby && lineCarriesBouten(boutenSpans, lineBytePos, lineBytePos + emitLen, lastOfLine);
       attr.indent = static_cast<uint8_t>(indentCells);
 
       if (lastOfLine) {
         if (!admit(segment, segmentLen, attr)) break;
         if (wantRuby && attr.hasRuby) collectRubyForLine(lineBytePos, lineBytePos + segmentLen, true, attrs.back());
+        if (wantBouten) collectBoutenForLine(lineBytePos, lineBytePos + segmentLen, true, attrs.back());
         lineBytePos = displayLen;  // Consumed entire display content
         break;
       }
@@ -1181,6 +1465,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       breakPos = emitLen;  // never 0: the line has to make progress
       if (!admit(segment, breakPos, attr)) break;
       if (wantRuby && attr.hasRuby) collectRubyForLine(lineBytePos, lineBytePos + breakPos, false, attrs.back());
+      if (wantBouten) collectBoutenForLine(lineBytePos, lineBytePos + breakPos, false, attrs.back());
 
       // Skip space at break point
       size_t skipChars = breakPos;
@@ -1379,6 +1664,7 @@ void TxtReaderActivity::renderPage() {
         // Drawn on the scan pass too: the ruby glyphs have to reach the prewarm
         // set or every one of them falls through the on-demand path.
         if (attr.rubyCount && rubyFontId) drawRubyHorizontal(line, attr, x, y);
+        if (attr.boutenCount) drawBoutenHorizontal(line, attr, x, y);
       }
       y += normalPitch;
       lineIndex++;
@@ -1436,6 +1722,7 @@ void TxtReaderActivity::renderPageVertical(const int lineHeight) {
         const int columnTop = cachedOrientedMarginTop + attr.indent * cellSize;
         renderer.drawTextVertical(cachedFontId, x, columnTop, cellSize, column.c_str());
         if (attr.rubyCount && rubyFontId) drawRubyVertical(column, attr, x, columnTop);
+        if (attr.boutenCount) drawBoutenVertical(column, attr, x, columnTop);
       }
       used += pitch;
       columnIndex++;

@@ -14,6 +14,15 @@ constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";  // ］ U+FF3D
 constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";   // 《 U+300A
 constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";  // ｜ U+FF5C
 constexpr char GETA[] = "\xE3\x80\x93";        // 〓 U+3013
+constexpr char KAGI_OPEN[] = "\xE3\x80\x8C";   // 「 U+300C
+constexpr char KAGI_CLOSE[] = "\xE3\x80\x8D";  // 」 U+300D
+constexpr char NI[] = "\xE3\x81\xAB";          // に U+306B
+constexpr char BOUTEN[] = "\xE5\x82\x8D\xE7\x82\xB9";  // 傍点
+
+constexpr size_t KAGI_OPEN_LEN = 3;
+constexpr size_t KAGI_CLOSE_LEN = 3;
+constexpr size_t NI_LEN = 3;
+constexpr size_t BOUTEN_LEN = 6;
 
 constexpr size_t KOME_LEN = 3;
 constexpr size_t NOTE_OPEN_LEN = 6;
@@ -137,7 +146,23 @@ size_t readFullWidthNumber(const char* body, const size_t len, size_t& value) {
 
 // What an annotation body (between ［＃ and ］) asks for. Only the forms acted on
 // are named; everything else is Other and is dropped as it always was.
-enum class NoteKind { Other, IndentLine, IndentRangeStart, IndentRangeEnd, HeadingBlock };
+enum class NoteKind { Other, IndentLine, IndentRangeStart, IndentRangeEnd, HeadingBlock, Bouten, BoutenRange };
+
+// ［＃「○○」に傍点］ and its kinds, and the ［＃傍点］ / ［＃傍点終わり］ range pair.
+// Only the first is acted on; the pair is named so it can be counted rather than
+// silently folded into Other, because the day a file uses one we want to know.
+bool looksLikeBouten(const char* body, const size_t len) {
+  if (!matches(body, len, KAGI_OPEN, KAGI_OPEN_LEN)) return false;
+  if (len < BOUTEN_LEN || memcmp(body + len - BOUTEN_LEN, BOUTEN, BOUTEN_LEN) != 0) return false;
+  // 「…」に<kind>傍点 — the に has to be there, or this is some other annotation
+  // that happens to end in 傍点.
+  for (size_t at = KAGI_OPEN_LEN; at + KAGI_CLOSE_LEN <= len; at++) {
+    if (memcmp(body + at, KAGI_CLOSE, KAGI_CLOSE_LEN) != 0) continue;
+    const size_t ni = at + KAGI_CLOSE_LEN;
+    return matches(body + ni, len - ni, NI, NI_LEN);
+  }
+  return false;
+}
 
 NoteKind classifyNote(const char* body, const size_t len, size_t& indent, size_t& hanging) {
   indent = 0;
@@ -191,6 +216,15 @@ NoteKind classifyNote(const char* body, const size_t len, size_t& indent, size_t
       indent = value;
       return NoteKind::IndentLine;
     }
+  }
+
+  // Emphasis. Kept rather than dropped since stage 2h, so the reader can draw it.
+  if (looksLikeBouten(body, len)) return NoteKind::Bouten;
+  // The range form, which nothing in the corpus uses. Counted, then dropped.
+  if ((len == BOUTEN_LEN && memcmp(body, BOUTEN, BOUTEN_LEN) == 0) ||
+      (len == BOUTEN_LEN + OWARI_LEN && memcmp(body, BOUTEN, BOUTEN_LEN) == 0 &&
+       matches(body + BOUTEN_LEN, len - BOUTEN_LEN, OWARI, OWARI_LEN))) {
+    return NoteKind::BoutenRange;
   }
 
   // ［＃「…」は大見出し］ and the ［＃中見出し］…［＃中見出し終わり］ pair.
@@ -388,12 +422,24 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
         i += NOTE_OPEN_LEN;
         continue;
       }
-      stats_.note++;
-
-      // The annotation itself always goes. A few of them leave something behind.
+      // The annotation itself goes, with one exception below. A few of the rest
+      // leave something behind.
       size_t indent = 0;
       size_t hanging = 0;
-      switch (classifyNote(p + NOTE_OPEN_LEN, close, indent, hanging)) {
+      const NoteKind kind = classifyNote(p + NOTE_OPEN_LEN, close, indent, hanging);
+      if (kind == NoteKind::Bouten) {
+        // Copied through whole, exactly as ruby is: the reader needs to know
+        // which characters were emphasised, and it is the only thing that knows
+        // how wide a line is. Counted separately from `note`, which counts what
+        // was removed.
+        stats_.bouten++;
+        beginContent();
+        lineOut_.append(p, NOTE_OPEN_LEN + close + NOTE_CLOSE_LEN);
+        i += NOTE_OPEN_LEN + close + NOTE_CLOSE_LEN;
+        continue;
+      }
+      stats_.note++;
+      switch (kind) {
         case NoteKind::IndentLine:
           // Only at the head of a line. ［＃N字下げ］ anywhere else is not indenting
           // anything, and there is nothing sensible to do with it. Recorded rather
@@ -419,6 +465,11 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
         case NoteKind::HeadingBlock:
           headingLine_ = true;
           break;
+        case NoteKind::BoutenRange:
+          stats_.boutenRange++;
+          break;
+        case NoteKind::Bouten:
+          break;  // handled above, before the annotation was dropped
         case NoteKind::Other:
           break;
       }

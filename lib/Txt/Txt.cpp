@@ -31,7 +31,10 @@ constexpr uint32_t ENCODING_MAGIC = 0x54584543;  // "TXEC"
 // the reader can apply it in cells against the live viewport and honour the
 // hanging indent of a wrapped paragraph. Both the byte count and the offsets
 // change again, and the per-range cap of 2 cells is gone with the spaces.
-constexpr uint8_t ENCODING_VERSION = 6;
+// v7 (stage 2h) keeps ［＃「…」に…傍点］ as well, so the reader can draw emphasis
+// dots. Same reasoning as the ruby in v5: the notation names characters, and only
+// the side that lays out a line knows where those characters ended up.
+constexpr uint8_t ENCODING_VERSION = 7;
 }  // namespace
 
 Txt::Txt(std::string path, std::string cacheBasePath)
@@ -546,14 +549,15 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
   const int n =
       snprintf(buf, sizeof(buf),
                "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
-               "kept: ruby=%lu range=%lu / removed: note=%lu headerLines=%lu\n"
+               "kept: ruby=%lu range=%lu bouten=%lu / removed: note=%lu headerLines=%lu boutenRange=%lu\n"
                "gaiji: restored=%lu geta=%lu\n"
                "indent: lines=%lu ranges=%lu hanging=%lu blanksAdded=%lu\n"
                "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
                "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
                path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
-               static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.note),
-               static_cast<unsigned long>(stats.headerLines), static_cast<unsigned long>(stats.gaijiRestored),
+               static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.bouten),
+               static_cast<unsigned long>(stats.note), static_cast<unsigned long>(stats.headerLines),
+               static_cast<unsigned long>(stats.boutenRange), static_cast<unsigned long>(stats.gaijiRestored),
                static_cast<unsigned long>(stats.gaijiGeta), static_cast<unsigned long>(stats.indentLines),
                static_cast<unsigned long>(stats.indentRanges), static_cast<unsigned long>(stats.indentHanging),
                static_cast<unsigned long>(stats.blanksAdded), rubyOpen, rubyClose, noteOpen, range, kome);
