@@ -188,7 +188,18 @@ bool twoLinesFit(const GfxRenderer& renderer, const int fontId, const char* labe
 // leaves the panel.
 void BaseTheme::drawHintLabel(GfxRenderer& renderer, const int fontId, const char* label, const int x,
                               const int boxWidth, const int boxTop, const int boxHeight, const int singleLineYOffset) {
-  constexpr int textPadding = 4;  // keeps a wrapped label off the button's border
+  // 2 and not 4: the border is 1 px, so 2 still leaves a clear pixel between the
+  // glyphs and the line, and the 4 px handed back is the whole point. Measured
+  // over the 434 Japanese strings: at 98 px the SMALL face fits 184 of them on
+  // one line, at 102 px it fits 209, because six full-width characters measure
+  // 100.2 px — every six-character label (ダウンロード among them) lands in that
+  // band. 3 px buys nothing at all: 100 px is still under 100.2.
+  //
+  // Lyra rounds the top corners at radius 6 and centres each line, so a wrapped
+  // line that is nearly the full width now starts 1 px from the border instead of
+  // 3 and can graze the arc. Cosmetic, and the centring — not the padding — is
+  // what puts it there.
+  constexpr int textPadding = 2;
   const int maxTextWidth = boxWidth - (textPadding * 2);
 
   const auto drawSingleLine = [&](const int useFontId, const char* text) {
