@@ -424,10 +424,17 @@ void TxtReaderActivity::initializeReader() {
   // figure was briefly recorded as 16 because the reader used to check it read
   // U+4E00 out of a 12-byte glyph record, and the on-disk record is 16 bytes
   // (EpdGlyph is not packed). See docs-jp/f8-ruby.md section 2.5-2.
+  //
+  // With no ruby face there is no band. The estimate that used to stand in here
+  // reserved (cell + 1) / 2 -- 45 px at 14 pt against the 47 px a real face asks
+  // for -- for glyphs that cannot be drawn, because every draw path is guarded on
+  // rubyFontId. That spent a page's height on white space and moved the page
+  // boundaries of a reader whose card has no SD family, which is exactly the
+  // reader that can least afford to lose lines.
   rubyFontId = sdFontSystem.loadRubyFont(renderer, SETTINGS.fontPointSize);
   rubyEm = rubyFontId ? renderer.getFullWidthAdvance(rubyFontId) : 0;
-  if (rubyEm < 1) rubyEm = (cellSize + 1) / 2;  // nothing to draw with; reserve the estimate
-  rubyPitch = std::max(normalPitch, cellSize + rubyEm + 1);
+  if (rubyEm < 1) rubyEm = 0;
+  rubyPitch = rubyEm > 0 ? std::max(normalPitch, cellSize + rubyEm + 1) : normalPitch;
   // Only an Aozora .txt can carry ruby. Everything else keeps a constant pitch,
   // which is the same arithmetic the line count used to be.
   if (!aozoraMarkup || isMarkdown) rubyPitch = normalPitch;
@@ -1420,7 +1427,7 @@ void TxtReaderActivity::renderPageVertical(const int lineHeight) {
         // its right as well; the group is centred in the band. With no ruby
         // anywhere this is (normalPitch - cellSize) / 2 to the byte, which is
         // what stage 2c placed.
-        const int groupWidth = attr.hasRuby ? cellSize + 1 + rubyEm : cellSize;
+        const int groupWidth = (attr.hasRuby && rubyEm > 0) ? cellSize + 1 + rubyEm : cellSize;
         const int x = contentRight - used - pitch + (pitch - groupWidth) / 2;
         // An indent runs down the column, because that is where a vertical line
         // starts. The ruby strips move with it: they are placed relative to the

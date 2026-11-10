@@ -88,9 +88,10 @@ class TxtReaderActivity final : public Activity {
   };
   std::vector<RubyDraw> pageRuby;
   std::string pageRubyText;
-  // The font ruby is drawn in, and its em. 0 when the card has no SD family, in
-  // which case ruby is laid out for but not drawn — which is what stage 2c
-  // shipped and what a reader with a built-in Latin font still gets.
+  // The font ruby is drawn in, and its em. Both 0 when the card has no SD family,
+  // in which case no band is reserved either: nothing can be drawn there, and
+  // reserving the space anyway cost such a reader lines for nothing (stage 2c
+  // and 2d did reserve it). A reader with a built-in Latin font takes this path.
   int rubyFontId = 0;
   int rubyEm = 0;
   int pageExtent = 0;
@@ -98,7 +99,8 @@ class TxtReaderActivity final : public Activity {
   // What a line carrying ruby costs instead: max(normal pitch, em + ruby + 1).
   // The max() is what makes a generous line spacing absorb the ruby for free
   // rather than making ruby demand a generous line spacing (homework 2 —
-  // f8-ruby.md section 2.5). Equal to normalPitch when it is absorbed.
+  // f8-ruby.md section 2.5). Equal to normalPitch when it is absorbed, and also
+  // when there is no ruby face to draw with.
   int rubyPitch = 0;
   bool initialized = false;
   // Set when an index cache existed but failed validation, i.e. a setting changed
