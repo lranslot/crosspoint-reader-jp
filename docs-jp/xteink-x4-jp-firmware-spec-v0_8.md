@@ -2089,6 +2089,7 @@ TXT リーダーからは使えないおそれがある** (§4.1)。その場合
 | **記法** | `［＃「○○」に傍点］` / `［＃傍点］`…`［＃傍点終わり］` |
 | **種類** | ゴマ点 (既定) / 白ゴマ / 丸 / 白丸 / 黒三角 / 白三角 / 二重丸 / 蛇の目 / ばつ |
 | **見積もり** | **ルビ実装後に約 60〜80 行** (記法の解析 40 / 点の描画 20 / 種類の出し分け 20) |
+| **実績 (2026-11-11)** | ★ **段階2h で実装。**Flash +3,162 B、RAM ±0。→ [f8-ruby.md §6.2](f8-ruby.md) |
 
 > **★ 前提条件**: **ルビが「領域を確保する」形で実装されること。**
 > EPUB 側の組版に渡す形 (文字列に `<ruby>` を埋めて `ParsedText` に流す) で
@@ -3228,7 +3229,66 @@ Classic なら 8pt に降格して 1 行で収まる。
 
 **枠内に収める責任は描画側 (`drawHintLabel`) にある** (§8.5-10〜12)。
 
-### 8.7 計測するとき
+### 8.7 `.cpfont` の style 数と太字の扱い — ★ 2026-11-11 に実測
+
+**UDEVGothic の `.cpfont` は 6 サイズすべて `styleCount = 1`**（regular のみ）。
+太字を要求している描画があるので、要求が通らないときに何が起きるかを確かめた。
+
+#### (a) 太字を要求している箇所
+
+| 層 | 面 | 太字を持つか |
+|---|---|---|
+| UI（テーマ・設定・ダイアログ 60 箇所以上） | `UI_10` / `UI_12` | **持つ。**`ui10FontFamily(&ui10RegularFont, &ui10BoldFont)`（[main.cpp:105-109](../src/main.cpp)）。影響なし |
+| UI（Lyra のヒント等） | `SMALL` | **持たない。**`smallFontFamily(&smallFont)` の 1 面のみ。ただし `SMALL` に太字を要求している箇所は**無い**（grep で 0 件） |
+| EPUB 本文 | 読書フォント（SD の `.cpfont` もここ） | **`<b>` / `<strong>` / 見出しが `EpdFontFamily::BOLD` を要求する**（`ChapterHtmlSlimParser.cpp:262`、`ParsedText.cpp:483/497`）。★ **和文フォントでは通らない** |
+| TXT 本文（縦書き・横書き） | 同上 | **要求しない。**`TxtReaderActivity` は全箇所 `EpdFontFamily::REGULAR` を明示している |
+
+#### (b) 要求した style が無いとき — **通常体に落ちる。無害**
+
+`SdCardFontManager.cpp:57` が
+`EpdFontFamily(getEpdFont(0), getEpdFont(1), getEpdFont(2), getEpdFont(3))` を作り、
+`styleCount = 1` なら 1〜3 は **`nullptr`** が入る。
+`EpdFontFamily::getFont()`（[EpdFontFamily.cpp:3-18](../lib/EpdFont/EpdFontFamily.cpp)）は
+`hasBold && bold` の形で null を見てから落とすので、
+**最後は必ず `regular` を返す。**
+
+```cpp
+} else if (hasBold && bold) {
+  return bold;
+}
+...
+return regular;
+```
+
+**豆腐にならない。描かれないこともない。**強調が平体になるだけである。
+SD フォント側にはもう 1 枚、`SdCardFont::resolveStyle()`
+（`SdCardFont.cpp:1389`）という表があり、
+`BOLD → REGULAR → BOLD_ITALIC → ITALIC` の順で**実在する面に解決してから**
+グリフを読む。先読み（prewarm）の対象を決めるのもこの解決後の値なので、
+**無い面のグリフを読みに行くことがない。**
+
+#### (c) 組み込みと SD の差
+
+| 面 | style 数 | 無い style を要求したら |
+|---|---|---|
+| Noto Serif / Noto Sans 12・14・16・18pt | **4**（regular/bold/italic/bold-italic） | 起きない |
+| `UI_10` / `UI_12` | **2**（regular/bold） | italic は regular に落ちる |
+| `SMALL` | **1** | regular に落ちる（要求する箇所は無い） |
+| SD の `.cpfont`（UDEVGothic） | **1** | regular に落ちる。加えて `resolveStyle()` で読む前に解決される |
+
+**挙動の差は無い。**どちらも最後は `regular` で、違うのは SD 側に解決の段が
+1 枚多いことだけ。`styleCount` はヘッダから読んでいるので、
+**4 面入りの `.cpfont` を置けばそのまま効く** — 作り直しは不要である。
+
+#### 実害として残るもの
+
+**EPUB の和文で `<b>` / `<strong>` / 見出しの太字が出ない。**
+壊れはしないが、著者の強調が平体になる
+── 青空記法の傍点を段階1 で捨てていたのと同じ種類の欠落である。
+対処は「4 面入りの和文 `.cpfont` を用意する」か
+「太字を合成する（疑似ボールド）」の 2 つで、**今回は実装しない。**
+
+### 8.8 計測するとき
 
 > 出典: **上流との差分計測** (2026-10-22) / **F-9** (`f561b5fd`)
 
