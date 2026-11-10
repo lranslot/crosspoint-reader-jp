@@ -101,6 +101,14 @@ class TxtReaderActivity final : public Activity {
   // rather than making ruby demand a generous line spacing (homework 2 —
   // f8-ruby.md section 2.5). Equal to normalPitch when it is absorbed, and also
   // when there is no ruby face to draw with.
+  //
+  // Where bouten (A7) will go, when it goes anywhere: this same band, extended
+  // outward. jlreq-d section 7.6.2 puts emphasis dots on the same side as ruby —
+  // right of the column in vertical writing, above the line in horizontal — and
+  // moves them further out, not to the opposite side, when both apply to one
+  // character (inner to outer: underline, then ruby, then dots). So the growth
+  // is cellSize + rubyEm + dotBand + 2 along the axis that already has a band,
+  // and nothing on the other side of the character. See f8-ruby.md section 6.1.
   int rubyPitch = 0;
   bool initialized = false;
   // Set when an index cache existed but failed validation, i.e. a setting changed
