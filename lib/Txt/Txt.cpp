@@ -26,7 +26,12 @@ constexpr uint32_t ENCODING_MAGIC = 0x54584543;  // "TXEC"
 // saved reading position are both byte offsets into this file.
 // v5 keeps the ruby notation instead of removing it, so content.u8 grows and
 // every offset into it moves. The reader strips it at layout time.
-constexpr uint8_t ENCODING_VERSION = 5;
+// v6 (stage 2g) stops resolving an indent into leading ideographic spaces and
+// writes the notation at the head of every line the indent covers instead, so
+// the reader can apply it in cells against the live viewport and honour the
+// hanging indent of a wrapped paragraph. Both the byte count and the offsets
+// change again, and the per-range cap of 2 cells is gone with the spaces.
+constexpr uint8_t ENCODING_VERSION = 6;
 }  // namespace
 
 Txt::Txt(std::string path, std::string cacheBasePath)
@@ -543,14 +548,14 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
                "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
                "kept: ruby=%lu range=%lu / removed: note=%lu headerLines=%lu\n"
                "gaiji: restored=%lu geta=%lu\n"
-               "indent: lines=%lu ranges=%lu tooWide=%lu blanksAdded=%lu\n"
+               "indent: lines=%lu ranges=%lu hanging=%lu blanksAdded=%lu\n"
                "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
                "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
                path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
                static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.note),
                static_cast<unsigned long>(stats.headerLines), static_cast<unsigned long>(stats.gaijiRestored),
                static_cast<unsigned long>(stats.gaijiGeta), static_cast<unsigned long>(stats.indentLines),
-               static_cast<unsigned long>(stats.indentRanges), static_cast<unsigned long>(stats.indentTooWide),
+               static_cast<unsigned long>(stats.indentRanges), static_cast<unsigned long>(stats.indentHanging),
                static_cast<unsigned long>(stats.blanksAdded), rubyOpen, rubyClose, noteOpen, range, kome);
 
   HalFile log = Storage.open("/aozora-strip.txt", O_WRITE | O_CREAT | O_AT_END);

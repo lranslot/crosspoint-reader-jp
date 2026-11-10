@@ -57,6 +57,16 @@ class TxtReaderActivity final : public Activity {
     // entries for one line are contiguous because the page is filled in order.
     uint16_t rubyFirst = 0;
     uint8_t rubyCount = 0;
+    // Cells of indent in front of this *visual* line, already resolved: the fill
+    // loop picks the paragraph's indent for the first visual line of a source
+    // line and its hanging indent for every continuation, and clamps both
+    // against the live viewport. Deliberately one number and not two — a visual
+    // line can only ever be drawn at one offset, and carrying both would let the
+    // value the renderer uses disagree with the value the wrap was measured
+    // against, which is exactly how a page break drifts away from what is drawn.
+    // The hanging indent itself belongs to the source line and never outlives
+    // the loop that applies it. See docs-jp/f8-aozora-notation.md section 5.5-8.
+    uint8_t indent = 0;
   };
   std::vector<std::string> currentPageLines;
   std::vector<LineAttr> currentPageAttrs;
@@ -142,6 +152,22 @@ class TxtReaderActivity final : public Activity {
   // Remove the ruby notation from `line` in place, recording each removal.
   // Removes `《…》` whole, and the `｜` that marks where a base run starts.
   static void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText);
+
+  // Read the indent marker AozoraStrip writes at the head of an indented line —
+  // ［＃N字下げ］ or ［＃N字下げ、折り返してM字下げ］ — and return how many bytes it
+  // spans, 0 when the line has none. The marker is left in the line rather than
+  // removed: the caller skips it the same way it skips a task-list marker, so no
+  // byte of the file is unaccounted for and the page index keeps naming real
+  // offsets.
+  static size_t parseIndentNotation(const std::string& line, uint8_t& indent, uint8_t& hanging);
+
+  // Cells of text a line must keep whatever the notation asks for. Aozora writes
+  // ［＃ここから１９字下げ］ to fake right-alignment against its own line length, not
+  // ours; clamping to this leaves such a line as far right as it can go instead
+  // of pushing its text off the page. 4 cells of a 12-cell line at 18 pt.
+  static constexpr int MIN_TEXT_CELLS = 4;
+  // Clamp an indent asked for in cells to what this viewport can give.
+  [[nodiscard]] int clampIndent(int cells) const;
   // Where the parent run of an annotation at `end` begins, in `stripped`.
   //
   // Aozora names the parent either explicitly with `｜`, or implicitly as the

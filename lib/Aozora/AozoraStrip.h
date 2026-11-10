@@ -32,30 +32,28 @@ class AozoraStrip {
     uint32_t gaijiRestored = 0;  // ※［＃…U+xxxx…］ replaced with that codepoint
     uint32_t gaijiGeta = 0;      // ※［＃…］ with no U+ replaced with 〓
     uint32_t headerLines = 0;    // lines dropped with the legend block
-    uint32_t indentLines = 0;    // ［＃N字下げ］ turned into N ideographic spaces
+    uint32_t indentLines = 0;    // ［＃N字下げ］ carried through as a line attribute
     uint32_t indentRanges = 0;   // ［＃ここからN字下げ］ ranges applied
-    uint32_t indentTooWide = 0;  // ranged indents dropped as too wide to be indents
+    uint32_t indentHanging = 0;  // 、折り返してM字下げ — ranges that also set a hanging indent
     uint32_t blanksAdded = 0;    // blank lines inserted around block headings
   };
 
-  // Widest ranged indent still treated as an indent. Beyond this the notation is
-  // not indenting a paragraph at all: Aozora writes ［＃ここから１９字下げ］ to push a
-  // date or an attribution out to the right margin, which is right-alignment
-  // faked with spaces. Replaying that as leading spaces breaks, because the
-  // number was chosen against the book's line length and not ours — at 18 pt a
-  // horizontal line holds 12 full-width characters, so a 19-character indent
-  // overruns the line outright, and a vertical one splits a single line across
-  // two columns with its halves at opposite ends of the page.
+  // Widest indent the notation is allowed to ask for. The cap that used to live
+  // here was 2, because the indent was replayed as leading ideographic spaces
+  // and the number in the file was chosen against the book's line length rather
+  // than ours: ［＃ここから１９字下げ］ is right-alignment faked with spaces, and at
+  // 18 pt a horizontal line holds 12 full-width characters, so replaying 19 of
+  // them overran the line outright.
   //
-  // 2 is safe at every size offered: 2 of 12 is 17% of the narrowest line. It
-  // also covers every real indent in the sample books — 27 of the 29 ranged
-  // indents in 戦争史大観 ask for 0 to 2, and the other two are exactly the
-  // faked right-alignment this cap excludes.
-  //
-  // Those two belong to 地付き / 字上げ, which is stage 3's work and needs a
-  // renderer that can right-align. Until then they are dropped — which is what
-  // the previous version did with every ranged indent, so nothing regresses.
-  static constexpr size_t MAX_RANGE_INDENT = 2;
+  // Since stage 2g the indent is a line attribute instead, and the only place
+  // that knows how many cells a line actually has is the reader, which clamps it
+  // against the live viewport (TxtReaderActivity, MIN_TEXT_CELLS). So the cap is
+  // gone from here and what survives is a sanity bound on the notation itself:
+  // 99 is two full-width digits, which is every value the grammar can spell
+  // without the file being malformed. 戦争史大観's two ［＃ここから１９字下げ］ lines
+  // now reach the reader and land as far right as the line allows, instead of
+  // being dropped.
+  static constexpr size_t MAX_INDENT = 99;
 
   // Drop lines [firstLine, secondLine] inclusive, 0-based, counted over the
   // whole file. Used for the legend block, whose bounds are two rule lines
@@ -90,6 +88,10 @@ class AozoraStrip {
   static constexpr size_t MAX_LINE_HOLD = 4096;
   std::string lineOut_;
   size_t rangeIndent_ = 0;        // ［＃ここからN字下げ］ in force, 0 when none
+  size_t rangeHanging_ = 0;       // 、折り返してM字下げ of that range, 0 when none
+  size_t lineIndent_ = 0;         // ［＃N字下げ］ seen on this line, overrides the range
+  size_t lineHanging_ = 0;        // hanging indent of this line's own notation
+  bool lineHasOwnIndent_ = false;  // a line-level ［＃N字下げ］ was seen on this line
   bool headingLine_ = false;      // a block heading was named on this line
   bool blankBeforeNext_ = false;  // the line just flushed was a block heading
   bool lastLineBlank_ = true;     // true at the start of a file: no leading blank
@@ -98,8 +100,9 @@ class AozoraStrip {
   // Append the held line to `out`, inserting a blank line in front of it when a
   // block heading needs one and the file does not already have it.
   void flushLine(std::string& out, bool withNewline);
-  // Open a line for ordinary content, applying a ranged indent if one is in
-  // force. Called before the first character of a line reaches lineOut_.
+  // Open a line for ordinary content, writing the indent marker in front of it
+  // when this line is indented. Called before the first character of a line
+  // reaches lineOut_, so an annotation-only line never gets one.
   void beginContent();
 
   size_t lineNumber_ = 0;

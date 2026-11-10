@@ -85,19 +85,24 @@ bool extractCodepoint(const char* p, const size_t len, uint32_t& cp) {
   return false;
 }
 
-constexpr char IDEO_SPACE[] = "\xE3\x80\x80";                                    // 　 U+3000
 constexpr char JISAGE[] = "\xE5\xAD\x97\xE4\xB8\x8B\xE3\x81\x92";                // 字下げ
 constexpr char KOKOKARA[] = "\xE3\x81\x93\xE3\x81\x93\xE3\x81\x8B\xE3\x82\x89";  // ここから
 constexpr char KOKODE[] = "\xE3\x81\x93\xE3\x81\x93\xE3\x81\xA7";                // ここで
+// 、折り返して — the separator that introduces a hanging indent inside a ranged
+// ［＃ここからN字下げ、折り返してM字下げ］.
+constexpr char ORIKAESHI[] =
+    "\xE3\x80\x81\xE6\x8A\x98\xE3\x82\x8A\xE8\xBF\x94\xE3\x81\x97\xE3\x81\xA6";  // 、折り返して
 constexpr char MIDASHI[] = "\xE8\xA6\x8B\xE5\x87\xBA\xE3\x81\x97";               // 見出し
 constexpr char DOUGYOU[] = "\xE5\x90\x8C\xE8\xA1\x8C";                           // 同行
 constexpr char MADO[] = "\xE7\xAA\x93";                                          // 窓
 constexpr char OWARI[] = "\xE7\xB5\x82\xE3\x82\x8F\xE3\x82\x8A";                 // 終わり
 
-constexpr size_t IDEO_SPACE_LEN = 3;
+constexpr char FW_DIGIT_LEAD[] = "\xEF\xBC";  // lead bytes of U+FF10..U+FF19
+constexpr size_t FW_DIGIT_LEAD_LEN = 2;
 constexpr size_t JISAGE_LEN = 9;
 constexpr size_t KOKOKARA_LEN = 12;
 constexpr size_t KOKODE_LEN = 9;
+constexpr size_t ORIKAESHI_LEN = 18;
 constexpr size_t MIDASHI_LEN = 9;
 constexpr size_t DOUGYOU_LEN = 6;
 constexpr size_t MADO_LEN = 3;
@@ -134,28 +139,46 @@ size_t readFullWidthNumber(const char* body, const size_t len, size_t& value) {
 // are named; everything else is Other and is dropped as it always was.
 enum class NoteKind { Other, IndentLine, IndentRangeStart, IndentRangeEnd, HeadingBlock };
 
-NoteKind classifyNote(const char* body, const size_t len, size_t& indent) {
+NoteKind classifyNote(const char* body, const size_t len, size_t& indent, size_t& hanging) {
   indent = 0;
+  hanging = 0;
 
   // ［＃ここで字下げ終わり］ — but also ［＃ここで字詰め終わり］, which is not ours.
   if (matches(body, len, KOKODE, KOKODE_LEN)) {
     return containsAt(body, len, JISAGE, JISAGE_LEN) ? NoteKind::IndentRangeEnd : NoteKind::Other;
   }
 
-  // ［＃ここからN字下げ］, and ［＃ここからN字下げ、折り返してM字下げ］. The hanging
-  // indent M is read past, not used: only whoever breaks the lines can honour it,
-  // and this runs at conversion time, before any of that is known (f8 5.5-4).
+  // ［＃ここからN字下げ］, and ［＃ここからN字下げ、折り返してM字下げ］.
+  //
+  // M is the hanging indent: the paragraph's first line is indented by N and every
+  // wrapped continuation by M. Stage 1.5 read past it, because the indent was
+  // replayed as leading spaces and only whoever breaks the lines can honour a
+  // continuation indent. Since 2g the indent travels as a line attribute and the
+  // reader is the one breaking lines, so M is carried through to it.
   if (matches(body, len, KOKOKARA, KOKOKARA_LEN)) {
-    const size_t digits = readFullWidthNumber(body + KOKOKARA_LEN, len - KOKOKARA_LEN, indent);
+    size_t at = KOKOKARA_LEN;
+    const size_t digits = readFullWidthNumber(body + at, len - at, indent);
     if (digits == 0) {
       // ［＃ここから改行天付き…］ indents by nothing, and every other ここから form
       // (罫囲み, ２段組, 字詰め) is not an indent at all. Both end any range in
       // force rather than extending it.
       return NoteKind::IndentRangeStart;
     }
-    if (!matches(body + KOKOKARA_LEN + digits, len - KOKOKARA_LEN - digits, JISAGE, JISAGE_LEN)) {
+    at += digits;
+    if (!matches(body + at, len - at, JISAGE, JISAGE_LEN)) {
       indent = 0;
       return NoteKind::Other;  // ［＃ここから２０字詰め］ — a line length, not an indent
+    }
+    at += JISAGE_LEN;
+    // The hanging half is read only where the grammar puts it: directly after the
+    // first 字下げ. Anything else there (a 、 opening some other clause) leaves
+    // hanging at 0 rather than guessing at it.
+    if (matches(body + at, len - at, ORIKAESHI, ORIKAESHI_LEN)) {
+      at += ORIKAESHI_LEN;
+      const size_t mDigits = readFullWidthNumber(body + at, len - at, hanging);
+      if (mDigits == 0 || !matches(body + at + mDigits, len - at - mDigits, JISAGE, JISAGE_LEN)) {
+        hanging = 0;
+      }
     }
     return NoteKind::IndentRangeStart;
   }
@@ -228,17 +251,57 @@ void AozoraStrip::flushLine(std::string& out, const bool withNewline) {
   blankBeforeNext_ = headingLine_;
   headingLine_ = false;
   lineReleased_ = false;
+  // A line-level ［＃N字下げ］ covers exactly its own line; a range survives it.
+  lineIndent_ = 0;
+  lineHanging_ = 0;
+  lineHasOwnIndent_ = false;
   lineOut_.clear();
 }
 
-void AozoraStrip::beginContent() {
-  // A ranged indent opens every line it covers. A line-level ［＃N字下げ］ has
-  // already put its own spaces in by the time this runs, so the two never stack.
-  if (lineOut_.empty() && rangeIndent_ > 0) {
-    for (size_t n = 0; n < rangeIndent_; n++) {
-      lineOut_.append(IDEO_SPACE, IDEO_SPACE_LEN);
-    }
+namespace {
+
+// Write `value` as full-width digits, which is how the notation spells numbers
+// and therefore what the reader's parser reads back.
+void appendFullWidthNumber(std::string& out, size_t value) {
+  char digits[4];  // MAX_INDENT is two digits; four is already more than enough
+  size_t n = 0;
+  do {
+    digits[n++] = static_cast<char>(value % 10);
+    value /= 10;
+  } while (value > 0 && n < sizeof(digits));
+  while (n > 0) {
+    n--;
+    out.append(FW_DIGIT_LEAD, FW_DIGIT_LEAD_LEN);  // U+FF10..U+FF19 share two lead bytes
+    out.push_back(static_cast<char>(0x90 + digits[n]));
   }
+}
+
+}  // namespace
+
+void AozoraStrip::beginContent() {
+  // The indent is written at the head of every line it covers, as the notation
+  // itself, rather than resolved into leading ideographic spaces. Two reasons it
+  // has to be per line and not per range: the reader lays out from an arbitrary
+  // file offset (F-9's lazy page index), so a line has to describe itself; and an
+  // indent counted in cells can only be turned into pixels where the viewport is
+  // known, which is not here.
+  //
+  // A line-level ［＃N字下げ］ overrides the range in force for its own line, which
+  // is what the notation means — the two never stack.
+  if (!lineOut_.empty()) return;
+  const size_t indent = lineHasOwnIndent_ ? lineIndent_ : rangeIndent_;
+  const size_t hanging = lineHasOwnIndent_ ? lineHanging_ : rangeHanging_;
+  if (indent == 0 && hanging == 0) return;
+
+  lineOut_.append(NOTE_OPEN, NOTE_OPEN_LEN);
+  appendFullWidthNumber(lineOut_, indent);
+  lineOut_.append(JISAGE, JISAGE_LEN);
+  if (hanging > 0) {
+    lineOut_.append(ORIKAESHI, ORIKAESHI_LEN);
+    appendFullWidthNumber(lineOut_, hanging);
+    lineOut_.append(JISAGE, JISAGE_LEN);
+  }
+  lineOut_.append(NOTE_CLOSE, NOTE_CLOSE_LEN);
 }
 
 size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, const bool atEnd) {
@@ -329,28 +392,29 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
 
       // The annotation itself always goes. A few of them leave something behind.
       size_t indent = 0;
-      switch (classifyNote(p + NOTE_OPEN_LEN, close, indent)) {
+      size_t hanging = 0;
+      switch (classifyNote(p + NOTE_OPEN_LEN, close, indent, hanging)) {
         case NoteKind::IndentLine:
           // Only at the head of a line. ［＃N字下げ］ anywhere else is not indenting
-          // anything, and there is nothing sensible to do with it.
-          if (lineOut_.empty() && indent > 0) {
-            for (size_t n = 0; n < indent; n++) {
-              lineOut_.append(IDEO_SPACE, IDEO_SPACE_LEN);
-            }
+          // anything, and there is nothing sensible to do with it. Recorded rather
+          // than written out: beginContent() emits the marker once the line turns
+          // out to have content, so an annotation-only line never carries one.
+          if (lineOut_.empty() && indent > 0 && indent <= MAX_INDENT) {
+            lineIndent_ = indent;
+            lineHanging_ = 0;
+            lineHasOwnIndent_ = true;
             stats_.indentLines++;
           }
           break;
         case NoteKind::IndentRangeStart:
-          if (indent > MAX_RANGE_INDENT) {
-            rangeIndent_ = 0;
-            stats_.indentTooWide++;
-          } else {
-            rangeIndent_ = indent;
-            if (indent > 0) stats_.indentRanges++;
-          }
+          rangeIndent_ = (indent <= MAX_INDENT) ? indent : 0;
+          rangeHanging_ = (hanging <= MAX_INDENT) ? hanging : 0;
+          if (rangeIndent_ > 0 || rangeHanging_ > 0) stats_.indentRanges++;
+          if (rangeHanging_ > 0) stats_.indentHanging++;
           break;
         case NoteKind::IndentRangeEnd:
           rangeIndent_ = 0;
+          rangeHanging_ = 0;
           break;
         case NoteKind::HeadingBlock:
           headingLine_ = true;

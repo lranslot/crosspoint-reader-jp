@@ -39,7 +39,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // and no longer anything derived from them (f8-ruby.md section 5.5).
 // 9: the ruby strip is reserved from the ruby font's measured em rather than
 // from an estimate, which moves rubyPitch and so moves where pages break.
-constexpr uint8_t CACHE_VERSION = 9;
+constexpr uint8_t CACHE_VERSION = 10;
 
 // progress.bin. Not part of the index cache and not validated against it, so
 // CACHE_VERSION does not cover this — hence its own magic and version.
@@ -417,8 +417,13 @@ void TxtReaderActivity::initializeReader() {
   // family ships whole point sizes and nothing on the card is half of 12 or 14.
   // The reserved strip is that font's own em, measured, not the (cell+1)/2 the
   // design memo assumed: on the measured family the smallest file is 8 pt with a
-  // 16 px em, so a 14 pt reader reserves 46 px per ruby line, not 45. Reserving
-  // the assumed figure would have let every ruby strip overflow by a pixel.
+  // 17 px em, so a 14 pt reader reserves 47 px per ruby line, not 45. Reserving
+  // the assumed figure would have let every ruby strip overflow by two pixels.
+  //
+  // 17 and not 16: the 8 pt advance is 16.6875, which toPixel rounds up. The
+  // figure was briefly recorded as 16 because the reader used to check it read
+  // U+4E00 out of a 12-byte glyph record, and the on-disk record is 16 bytes
+  // (EpdGlyph is not packed). See docs-jp/f8-ruby.md section 2.5-2.
   rubyFontId = sdFontSystem.loadRubyFont(renderer, SETTINGS.fontPointSize);
   rubyEm = rubyFontId ? renderer.getFullWidthAdvance(rubyFontId) : 0;
   if (rubyEm < 1) rubyEm = (cellSize + 1) / 2;  // nothing to draw with; reserve the estimate
@@ -887,6 +892,68 @@ void TxtReaderActivity::drawRubyVertical(const std::string& column, const LineAt
   }
 }
 
+size_t TxtReaderActivity::parseIndentNotation(const std::string& line, uint8_t& indent, uint8_t& hanging) {
+  // ［＃ U+FF3B U+FF03, ］ U+FF3D, 字下げ, 、折り返して — bytes, not literals, so the
+  // encoding of this file cannot change what they mean. Must stay the spelling
+  // AozoraStrip::beginContent() writes.
+  static constexpr char NOTE_OPEN[] = "\xEF\xBC\xBB\xEF\xBC\x83";
+  static constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";
+  static constexpr char JISAGE[] = "\xE5\xAD\x97\xE4\xB8\x8B\xE3\x81\x92";
+  static constexpr char ORIKAESHI[] = "\xE3\x80\x81\xE6\x8A\x98\xE3\x82\x8A\xE8\xBF\x94\xE3\x81\x97\xE3\x81\xA6";
+  static constexpr size_t NOTE_OPEN_LEN = 6;
+  static constexpr size_t NOTE_CLOSE_LEN = 3;
+  static constexpr size_t JISAGE_LEN = 9;
+  static constexpr size_t ORIKAESHI_LEN = 18;
+
+  indent = 0;
+  hanging = 0;
+  const size_t len = line.size();
+  if (len < NOTE_OPEN_LEN || memcmp(line.data(), NOTE_OPEN, NOTE_OPEN_LEN) != 0) return 0;
+
+  // One full-width digit run, then 字下げ. Reading digits only where the grammar
+  // puts them is what keeps ［＃ここから１字下げ、折り返して２字下げ］ from being read
+  // as a single twelve-cell indent (the mistake the F-8 survey script made).
+  const auto readNumber = [&](size_t& at, unsigned& value) {
+    const size_t from = at;
+    value = 0;
+    while (at + 3 <= len && static_cast<uint8_t>(line[at]) == 0xEF && static_cast<uint8_t>(line[at + 1]) == 0xBC &&
+           static_cast<uint8_t>(line[at + 2]) >= 0x90 && static_cast<uint8_t>(line[at + 2]) <= 0x99) {
+      value = value * 10 + static_cast<unsigned>(static_cast<uint8_t>(line[at + 2]) - 0x90);
+      at += 3;
+    }
+    return at > from;
+  };
+  const auto expect = [&](size_t& at, const char* want, const size_t wantLen) {
+    if (len - at < wantLen || memcmp(line.data() + at, want, wantLen) != 0) return false;
+    at += wantLen;
+    return true;
+  };
+
+  size_t at = NOTE_OPEN_LEN;
+  unsigned n = 0;
+  if (!readNumber(at, n) || !expect(at, JISAGE, JISAGE_LEN)) return 0;
+  unsigned m = 0;
+  if (expect(at, ORIKAESHI, ORIKAESHI_LEN)) {
+    if (!readNumber(at, m) || !expect(at, JISAGE, JISAGE_LEN)) return 0;
+  }
+  if (!expect(at, NOTE_CLOSE, NOTE_CLOSE_LEN)) return 0;
+
+  indent = static_cast<uint8_t>(std::min(n, 255u));
+  hanging = static_cast<uint8_t>(std::min(m, 255u));
+  return at;
+}
+
+int TxtReaderActivity::clampIndent(const int cells) const {
+  if (cells <= 0) return 0;
+  // Vertically a column holds charsPerUnit cells outright; horizontally the line
+  // holds as many full-width cells as its width divides into. Both are the live
+  // viewport, which is the whole reason this clamp cannot live in the converter.
+  const int available = isVertical ? charsPerUnit : (cellSize > 0 ? viewportWidth / cellSize : 0);
+  const int room = available - MIN_TEXT_CELLS;
+  if (room <= 0) return 0;
+  return std::min(cells, room);
+}
+
 bool TxtReaderActivity::lineCarriesRuby(const std::vector<RubySpan>& spans, const size_t start, const size_t end,
                                         const bool isLastOfSourceLine) {
   for (const auto& span : spans) {
@@ -1006,9 +1073,28 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // checklist, not something typeset, and its lines are never Aozora.
     rubySpans.clear();
     rubyText.clear();
+    size_t prefixLen = 0;
+    int firstIndent = 0;
+    int hangIndent = 0;
     if (aozoraMarkup && !isMarkdown) {
       stripRubyNotation(line, rubySpans, rubyText);
       displayLen = line.size();
+
+      // Stage 2g: the indent arrives as the notation at the head of the line, and
+      // is skipped rather than removed — prefixLen already carries the bytes a
+      // line spends on markup that is not laid out, so `pos` stays in file
+      // coordinates with nothing new to reconcile. Read after the ruby strip, so
+      // the offsets here and the wrap below are in the same (stripped) space.
+      uint8_t askedIndent = 0;
+      uint8_t askedHanging = 0;
+      prefixLen = parseIndentNotation(line, askedIndent, askedHanging);
+      if (prefixLen > 0) {
+        firstIndent = clampIndent(askedIndent);
+        // No hanging indent in the notation means the continuations line up under
+        // the first line's text, not back at the margin: that is what 青空文庫
+        // writes ［＃ここからN字下げ］ for a block quote to mean.
+        hangIndent = askedHanging > 0 ? clampIndent(askedHanging) : firstIndent;
+      }
     }
 
     // Detect a task list marker before wrapping: the notation only ever appears
@@ -1022,7 +1108,6 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     // instead. Because none of "[ ]", "[x]", "[X]" is ever measured, toggling a
     // line can no longer move a wrap point — which is what the width
     // normalisation that used to live here existed to prevent.
-    size_t prefixLen = 0;
     if (isMarkdown) {
       size_t markPos = 0;
       char mark = 0;
@@ -1055,12 +1140,19 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       const char* segment = line.c_str() + lineBytePos;
       const size_t segmentLen = displayLen - lineBytePos;
 
+      // The indent is spent out of this visual line's own budget: the paragraph's
+      // on its first line, the hanging one on every continuation. Measured here
+      // and stored on the line, so what the wrap was computed against and what
+      // the renderer draws at are the same number by construction.
+      const int indentCells = (lineBytePos == prefixLen) ? firstIndent : hangIndent;
+      const int indentPx = indentCells * cellSize;
+
       // Horizontally the break is a measured width; vertically it is a count,
       // because every codepoint occupies one cell and there is nothing to
       // measure. Both produce the same thing: how many bytes go in this unit.
-      size_t breakPos = isVertical
-                            ? advanceCodepoints(segment, segmentLen, charsPerUnit)
-                            : renderer.findWrapOffset(cachedFontId, segment, viewportWidth, EpdFontFamily::REGULAR);
+      size_t breakPos =
+          isVertical ? advanceCodepoints(segment, segmentLen, std::max(1, charsPerUnit - indentCells))
+                     : renderer.findWrapOffset(cachedFontId, segment, viewportWidth - indentPx, EpdFontFamily::REGULAR);
 
       // The ruby strip is reserved before the line is admitted, because what it
       // costs is what decides whether it fits. Where the ruby was taken out is
@@ -1070,6 +1162,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       const size_t emitLen = lastOfLine ? segmentLen : (breakPos == 0 ? 1 : breakPos);
       LineAttr attr;
       attr.hasRuby = lineCarriesRuby(rubySpans, lineBytePos, lineBytePos + emitLen, lastOfLine);
+      attr.indent = static_cast<uint8_t>(indentCells);
 
       if (lastOfLine) {
         if (!admit(segment, segmentLen, attr)) break;
@@ -1241,7 +1334,12 @@ void TxtReaderActivity::renderPage() {
         }
       }
       if (!line.empty()) {
-        int x = textLeft;
+        // The indent is part of the line's left edge, so every alignment below
+        // measures from it: a centred or right-aligned indented line keeps the
+        // indent and loses the space on the other side, which is what an indent
+        // means. contentWidth shrinks by the same amount for the same reason.
+        const int indentPx = attr.indent * cellSize;
+        int x = textLeft + indentPx;
         const bool lineIsRtl = BidiUtils::startsWithRtl(line.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
         uint8_t effectiveAlignment = cachedParagraphAlignment;
         if (lineIsRtl && (effectiveAlignment == CrossPointSettings::LEFT_ALIGN ||
@@ -1257,7 +1355,7 @@ void TxtReaderActivity::renderPage() {
             // x already set to left margin
             break;
           case CrossPointSettings::CENTER_ALIGN: {
-            x = textLeft + (contentWidth - textWidth) / 2;
+            x = textLeft + indentPx + (contentWidth - indentPx - textWidth) / 2;
             break;
           }
           case CrossPointSettings::RIGHT_ALIGN: {
@@ -1324,8 +1422,13 @@ void TxtReaderActivity::renderPageVertical(const int lineHeight) {
         // what stage 2c placed.
         const int groupWidth = attr.hasRuby ? cellSize + 1 + rubyEm : cellSize;
         const int x = contentRight - used - pitch + (pitch - groupWidth) / 2;
-        renderer.drawTextVertical(cachedFontId, x, cachedOrientedMarginTop, cellSize, column.c_str());
-        if (attr.rubyCount && rubyFontId) drawRubyVertical(column, attr, x, cachedOrientedMarginTop);
+        // An indent runs down the column, because that is where a vertical line
+        // starts. The ruby strips move with it: they are placed relative to the
+        // column top, so passing the indented top keeps every annotation over
+        // the character it belongs to.
+        const int columnTop = cachedOrientedMarginTop + attr.indent * cellSize;
+        renderer.drawTextVertical(cachedFontId, x, columnTop, cellSize, column.c_str());
+        if (attr.rubyCount && rubyFontId) drawRubyVertical(column, attr, x, columnTop);
       }
       used += pitch;
       columnIndex++;
