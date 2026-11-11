@@ -1,0 +1,4 @@
+add_executable(AozoraIndentTest AozoraIndentTest.cpp)
+target_include_directories(AozoraIndentTest PRIVATE ${REPO_ROOT}/src/activities/reader)
+target_link_libraries(AozoraIndentTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(AozoraIndentTest)
