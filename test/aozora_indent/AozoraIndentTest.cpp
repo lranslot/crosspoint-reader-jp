@@ -120,7 +120,11 @@ int carryAt(const Corpus& c, const size_t pageStart, const size_t maxBack) {
   return aozora::carryCells(indent, hanging);
 }
 
-constexpr size_t kMaxBack = 8 * 1024;
+// What TxtReaderActivity::recoverIndentCarry() is willing to read back: 32 KB,
+// in 4 KB steps. The corpus's longest line is 2,845 bytes, so one step resolves
+// every real paragraph; the figure here has to track the reader's or this stops
+// describing it.
+constexpr size_t kMaxBack = 32 * 1024;
 
 // --- the defect -------------------------------------------------------------
 
@@ -174,9 +178,9 @@ TEST(AozoraIndent, TheFirstLineOfTheFileIsALineHeadWithNoNewlineBehindIt) {
 
 TEST(AozoraIndent, ASingleIndentedLineFillingTheWholeFileIsCarriedFromItsHead) {
   // The shape that made the device drop four columns in a row: one paragraph
-  // long enough to span several pages. 2,000 characters is 6 KB, longer than
-  // anything in the corpus (the longest measured paragraph is under 3 KB) and
-  // still inside the look-back.
+  // long enough to span several pages. 2,000 characters is 6 KB, twice the
+  // longest line in the corpus (2,845 bytes, measured with tools/layout_harness)
+  // and still inside a single 4 KB look-back step.
   const std::string n = notation(4);
   const Corpus c = build({{4, n.size(), n + body(2000)}});
   const size_t len = c.lines[0].text.size();
@@ -204,9 +208,9 @@ TEST(AozoraIndent, AParagraphLongerThanTheLookBackLosesItsIndentAndSaysSo) {
   // mistaken for a case that works. The reader counts these and puts the count
   // on the card as carrylost=N rather than quietly indenting at the margin.
   const std::string n = notation(4);
-  const Corpus c = build({{4, n.size(), n + body(4000)}});  // 12 KB in one line
-  EXPECT_EQ(carryAt(c, 5000, kMaxBack), 4);                 // still within reach
-  EXPECT_EQ(carryAt(c, 11000, kMaxBack), HEAD_OUT_OF_REACH);
+  const Corpus c = build({{4, n.size(), n + body(14000)}});  // 42 KB in one line
+  EXPECT_EQ(carryAt(c, 20000, kMaxBack), 4);                 // still within reach
+  EXPECT_EQ(carryAt(c, 41000, kMaxBack), HEAD_OUT_OF_REACH);
 }
 
 // --- the parser, which moved out of the activity unchanged ------------------

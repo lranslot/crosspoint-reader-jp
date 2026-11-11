@@ -1250,13 +1250,21 @@ void TxtReaderActivity::drawBoutenVertical(const std::string& column, const Line
   }
 }
 
-// How far back the head of a source line is looked for. A 青空文庫 paragraph is
-// one line, so this is a paragraph length, not a display line: 8 KB is longer
-// than any paragraph in the corpus (the longest measured is under 3 KB) and is
-// the same figure the forward read already uses.
+// How far back the head of a source line is looked for, and in what steps.
+//
+// A 青空文庫 paragraph is one line, so this is a paragraph length and not a
+// display line. Measured over the corpus with tools/layout_harness: the longest
+// line is 2,845 bytes (最終戦争論), then 2,080 (戦争史大観) and 1,540
+// (新日本の進路); the F-8 test file has a deliberate 23,838-byte line.
+//
+// The step is 4 KB and not 512 bytes because the cost here is SD reads, not
+// bytes: one 4 KB read resolves every paragraph in the corpus, where 512-byte
+// steps would take six of them for the longest. 32 KB of look-back then covers
+// the test file too, in eight reads, and is only ever reached by a line no real
+// book contains.
 namespace {
-constexpr size_t INDENT_CARRY_MAX_BACK = 8 * 1024;
-constexpr size_t INDENT_CARRY_STEP = 512;
+constexpr size_t INDENT_CARRY_MAX_BACK = 32 * 1024;
+constexpr size_t INDENT_CARRY_STEP = 4 * 1024;
 // The notation is at most ［＃NNN字下げ、折り返してMMM字下げ］ = 54 bytes. Read a
 // little more than that so a malformed one is rejected by the parser rather
 // than by the window ending early.
@@ -1311,6 +1319,9 @@ bool TxtReaderActivity::recoverIndentCarry(const size_t offset, int& cells) {
     // rather than guessed at, because this is exactly the shape of bug that
     // stage 2g shipped with.
     LOG_ERR("TRS", "Indent carry: no line head within %zu bytes of %zu", INDENT_CARRY_MAX_BACK, offset);
+    // Counted as "could not be checked", not "an indent was dropped": the line
+    // may well have had no notation. Over-reporting is the right direction for a
+    // counter whose whole purpose is to say when this stopped being reliable.
     indentCarryLost++;
     return false;
   }
