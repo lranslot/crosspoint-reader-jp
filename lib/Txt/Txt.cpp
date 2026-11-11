@@ -583,21 +583,22 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
 
   const std::string& path = filepath;
   char buf[512];
-  const int n =
-      snprintf(buf, sizeof(buf),
-               "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
-               "kept: ruby=%lu range=%lu bouten=%lu / removed: note=%lu headerLines=%lu boutenRange=%lu\n"
-               "gaiji: restored=%lu geta=%lu\n"
-               "indent: lines=%lu ranges=%lu hanging=%lu blanksAdded=%lu\n"
-               "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
-               "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
-               path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
-               static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.bouten),
-               static_cast<unsigned long>(stats.note), static_cast<unsigned long>(stats.headerLines),
-               static_cast<unsigned long>(stats.boutenRange), static_cast<unsigned long>(stats.gaijiRestored),
-               static_cast<unsigned long>(stats.gaijiGeta), static_cast<unsigned long>(stats.indentLines),
-               static_cast<unsigned long>(stats.indentRanges), static_cast<unsigned long>(stats.indentHanging),
-               static_cast<unsigned long>(stats.blanksAdded), rubyOpen, rubyClose, noteOpen, range, kome);
+  const int n = snprintf(buf, sizeof(buf),
+                         "file: %s\ndetected: aozora\nsource bytes: %zu -> content.u8 bytes: %zu\n"
+                         "kept: ruby=%lu range=%lu bouten=%lu variant=%lu / removed: note=%lu headerLines=%lu "
+                         "boutenRange=%lu\n"
+                         "gaiji: restored=%lu geta=%lu\n"
+                         "indent: lines=%lu ranges=%lu hanging=%lu blanksAdded=%lu\n"
+                         "remaining: \xE3\x80\x8A=%zu \xE3\x80\x8B=%zu \xEF\xBC\xBB\xEF\xBC\x83=%zu "
+                         "\xEF\xBD\x9C=%zu \xE2\x80\xBB=%zu\n\n",
+                         path.c_str(), sourceSize, convertedSize, static_cast<unsigned long>(stats.ruby),
+                         static_cast<unsigned long>(stats.range), static_cast<unsigned long>(stats.bouten),
+                         static_cast<unsigned long>(stats.boutenVariant), static_cast<unsigned long>(stats.note),
+                         static_cast<unsigned long>(stats.headerLines), static_cast<unsigned long>(stats.boutenRange),
+                         static_cast<unsigned long>(stats.gaijiRestored), static_cast<unsigned long>(stats.gaijiGeta),
+                         static_cast<unsigned long>(stats.indentLines), static_cast<unsigned long>(stats.indentRanges),
+                         static_cast<unsigned long>(stats.indentHanging), static_cast<unsigned long>(stats.blanksAdded),
+                         rubyOpen, rubyClose, noteOpen, range, kome);
 
   HalFile log = Storage.open("/aozora-strip.txt", O_WRITE | O_CREAT | O_AT_END);
   if (log && n > 0) {

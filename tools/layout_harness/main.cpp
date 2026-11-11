@@ -164,6 +164,7 @@ bool looksUtf8(const std::string& s) {
 struct ConvertResult {
   std::string out;
   heapcount::Stats heap;
+  AozoraStrip::Stats stats;
   size_t maxChunkOut = 0;  // largest single strip output, which is what `stripped` needs
   size_t maxStripIn = 0;   // largest single strip input, which is what `buffer_` needs
 };
@@ -216,6 +217,7 @@ ConvertResult convertUtf8(const std::string& src) {
     }
   }
   r.heap = heapcount::end();
+  r.stats = strip.stats();
   return r;
 }
 
@@ -279,6 +281,7 @@ ConvertResult convertSjis(const std::string& src) {
     }
   }
   r.heap = heapcount::end();
+  r.stats = strip.stats();
   return r;
 }
 
@@ -597,8 +600,10 @@ int modeBouten(const std::string& dir, const char* only) {
         lineStart = lineEnd + 1;
       }
       std::printf(
-          "%-20s %-7s pages=%-5zu notes=%-5zu variants=%-4zu | one index build counts: notes=%zu variants=%zu\n",
-          name.c_str(), s.name, starts.size(), notes, variants, noteScans, variantScans);
+          "%-20s %-7s pages=%-5zu notes=%-5zu variants=%-4zu converter: bouten=%lu variant=%lu | one index "
+          "build counts: notes=%zu variants=%zu\n",
+          name.c_str(), s.name, starts.size(), notes, variants, static_cast<unsigned long>(conv.stats.bouten),
+          static_cast<unsigned long>(conv.stats.boutenVariant), noteScans, variantScans);
     }
   }
   return 0;

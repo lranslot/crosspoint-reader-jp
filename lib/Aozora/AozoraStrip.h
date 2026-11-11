@@ -43,6 +43,12 @@ class AozoraStrip {
     uint32_t blanksAdded = 0;    // blank lines inserted around block headings
     uint32_t bouten = 0;         // ［＃「…」に…傍点］ kept, for the reader to draw
     uint32_t boutenRange = 0;    // ［＃傍点］…［＃傍点終わり］ — unsupported, still dropped
+    // Annotations naming a kind we do not cut a shape for (三角, 二重丸, 蛇の目,
+    // ばつ). Counted here and nowhere else, because the converter is the one pass
+    // that sees each annotation exactly once: the reader's own bt= counters count
+    // scans and renders, which is a different question and was read as this one
+    // (docs-jp/crash-postmortems.md section 7).
+    uint32_t boutenVariant = 0;
   };
 
   // Widest indent the notation is allowed to ask for. The cap that used to live

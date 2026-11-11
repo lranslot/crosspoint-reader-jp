@@ -4,6 +4,8 @@
 
 #include <cstring>
 
+#include "BoutenNote.h"
+
 namespace {
 
 // UTF-8 spellings of the notation. Written as escapes rather than literals so the
@@ -446,6 +448,12 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
         // how wide a line is. Counted separately from `note`, which counts what
         // was removed.
         stats_.bouten++;
+        // The kind, counted once per annotation. The same classifier the reader
+        // uses, so the two cannot disagree about what "a variant" is.
+        bouten::Note note;
+        if (bouten::parseNote(p + NOTE_OPEN_LEN, close, note) && note.approximated) {
+          stats_.boutenVariant++;
+        }
         beginContent();
         lineOut_.append(p, NOTE_OPEN_LEN + close + NOTE_CLOSE_LEN);
         i += NOTE_OPEN_LEN + close + NOTE_CLOSE_LEN;
