@@ -2,9 +2,11 @@
 
 #include <Txt.h>
 
+#include <atomic>
 #include <vector>
 
 #include "CrossPointSettings.h"
+#include "PageTurnQueue.h"
 #include "activities/Activity.h"
 
 class TxtReaderActivity final : public Activity {
@@ -405,6 +407,22 @@ class TxtReaderActivity final : public Activity {
 #endif
   // outCheckboxes is only passed by render(); buildPageIndex() sweeps every page
   // and must not pay for checkbox scanning.
+  // Page turns owed, and whether a render is still outstanding for the last
+  // batch. The flag is written by loop() on the main task and cleared by
+  // render() on the render task, so it is atomic; nothing else about a page turn
+  // crosses tasks.
+  PageTurnQueue turnQueue;
+  std::atomic<bool> renderOutstanding{false};
+  // Times fewer pages were turned than were asked for -- the end of the book, or
+  // the index frontier going backwards. Reported on the diagnostic line for the
+  // same reason as the others: serial output does not reach this device's user.
+  uint16_t turnsShort = 0;
+  // Where the page starting at `offset` ends. Lays the page out when neither the
+  // last render nor the index can say, which is what lets a multi-page turn work
+  // past the index frontier.
+  [[nodiscard]] size_t nextPageOffset(size_t offset);
+  // Turn `n` pages, positive forward, in one render.
+  void applyPageTurns(int n);
   bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, std::vector<LineAttr>* outAttrs,
                         size_t& nextOffset, std::vector<CheckboxRef>* outCheckboxes = nullptr);
   void buildPageIndex();

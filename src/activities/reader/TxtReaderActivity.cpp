@@ -289,45 +289,104 @@ void TxtReaderActivity::loop() {
     return;
   }
 
-  const size_t fileSize = txt->getFileSize();
+  // Counted rather than acted on while the screen is still being drawn, then
+  // applied together. See PageTurnQueue.h for why the first press is never
+  // delayed by this, and for the book-closing edge it removes.
+  if (prevTriggered) turnQueue.push(false);
+  if (nextTriggered) turnQueue.push(true);
+  if (turnQueue.ready(renderOutstanding.load())) {
+    applyPageTurns(turnQueue.take());
+  }
+}
 
-  if (prevTriggered) {
-    // Rule 4: the walked route first — those offsets are exact even off-grid.
-    if (offsetHistory.size() > 1) {
-      const size_t previous = offsetHistory[offsetHistory.size() - 2];
-      goToOffset(previous, false);
-      enteredFromForward = true;
-      requestUpdate();
-    } else if (currentOffset <= pageOffsets.back() && currentPage > 0) {
-      // No history, but the index reaches back this far.
-      goToOffset(pageOffsets[currentPage - 1], false);
-      enteredFromForward = true;
-      requestUpdate();
-    } else if (currentPage > 0 && !loadingPopupShown) {
+// Where the page starting at `offset` ends, i.e. where the next one starts.
+// Returns `offset` itself when there is no next page.
+//
+// Three sources, cheapest first. The last one lays the page out to find out,
+// which is what makes a multi-page turn possible at all past the index frontier
+// -- the alternative, falling back to fileSize the way the single-step turn used
+// to, closes the book.
+size_t TxtReaderActivity::nextPageOffset(const size_t offset) {
+  const size_t fileSize = txt->getFileSize();
+  if (offset >= fileSize) return offset;
+  // What the last render left behind, free and exact, for the page on screen.
+  if (offset == currentOffset && currentPageNextOffset > currentOffset) return currentPageNextOffset;
+  // The index, when it reaches past this page.
+  const int page = pageForOffset(offset);
+  if (page + 1 < static_cast<int>(pageOffsets.size()) && pageOffsets[page] == offset) {
+    return pageOffsets[page + 1];
+  }
+  // Neither: lay it out. Held under the RenderLock for the same reason
+  // advanceIndex() is -- it seeks the shared sequential read handle.
+  if (RenderLock::peek()) return offset;  // a render holds it; try again next pass
+  RenderLock lock;
+  std::vector<std::string> throwaway;
+  size_t next = offset;
+  if (!loadPageAtOffset(offset, throwaway, nullptr, next) || next <= offset) return offset;
+  return next;
+}
+
+// Turn `n` pages, positive forward. The count that was asked for and the count
+// that was possible are not the same thing at either end of the book, and the
+// difference is counted rather than passed off as success.
+void TxtReaderActivity::applyPageTurns(const int n) {
+  if (n == 0) return;
+  const size_t fileSize = txt->getFileSize();
+  int moved = 0;
+
+  if (n > 0) {
+    for (int i = 0; i < n; i++) {
+      const size_t next = nextPageOffset(currentOffset);
+      if (next <= currentOffset || next >= fileSize) break;
+      goToOffset(next, true);
+      moved++;
+    }
+    if (moved == 0) {
+      // Nothing to move to and nothing moved: the reader is at the end of the
+      // book, which is what the single-step turn has always treated as "leave".
+      // Only when *no* page was turned -- a three-page press that ran out after
+      // one is a short turn, not a request to close the file.
+      onGoHome();
+      return;
+    }
+  } else {
+    for (int i = 0; i < -n; i++) {
+      // Rule 4: the walked route first -- those offsets are exact even off-grid.
+      if (offsetHistory.size() > 1) {
+        goToOffset(offsetHistory[offsetHistory.size() - 2], false);
+        enteredFromForward = true;
+        moved++;
+        continue;
+      }
+      if (!pageOffsets.empty() && currentOffset <= pageOffsets.back() && currentPage > 0) {
+        // No history, but the index reaches back this far.
+        goToOffset(pageOffsets[currentPage - 1], false);
+        enteredFromForward = true;
+        moved++;
+        continue;
+      }
+      break;
+    }
+    if (moved == 0 && currentPage > 0 && !loadingPopupShown) {
       // Behind the indexed range with nothing walked to fall back on. Refusing is
       // the correct answer: building synchronously to satisfy it is exactly the
-      // 48-second stall the EPUB reader hit. Said once — a full-screen refresh per
-      // press would be worse than the refusal itself, and the status bar keeps
-      // showing the count as estimated.
+      // 48-second stall the EPUB reader hit. Said once -- a full-screen refresh
+      // per press would be worse than the refusal itself, and the status bar
+      // keeps showing the count as estimated.
       loadingPopupShown = true;
       GUI.drawPopup(renderer, tr(STR_LOADING));
       pagesUntilFullRefresh = 1;
       requestUpdate();
-    }
-  } else if (nextTriggered) {
-    // Rule 3: walk forward by where the drawn page ended, so the reader is never
-    // held up by the index. Falls back to the index if render() has not run yet —
-    // it is on another task, so the very first turn can arrive first.
-    const size_t nextOffset = currentPageNextOffset > currentOffset
-                                  ? currentPageNextOffset
-                                  : (currentPage + 1 < totalPages ? pageOffsets[currentPage + 1] : fileSize);
-    if (nextOffset < fileSize) {
-      goToOffset(nextOffset, true);
-      requestUpdate();
-    } else {
-      onGoHome();
+      return;
     }
   }
+
+  if (moved == 0) return;
+  const int asked = n > 0 ? n : -n;
+  if (moved < asked) turnsShort++;
+  // One render for however many pages were turned, which is the whole point.
+  renderOutstanding = true;
+  requestUpdate();
 }
 
 #if READER_OPEN_DIAG
@@ -365,13 +424,18 @@ void TxtReaderActivity::writeOpenDiagnostic() {
   const bool bootOpen = diagLineWritten ? diagBootOpen : APP_STATE.bootOpenedReader;
   // Appended only when it is non-zero, so an ordinary line is byte for byte the
   // shape it has always been and an abnormal one is unmistakable.
-  char notReady[48] = "";
+  char notReady[80] = "";
   int at = 0;
   if (geometryNotReady > 0) {
     at += snprintf(notReady + at, sizeof(notReady) - at, " notready=%u", geometryNotReady);
   }
   if (indentCarryLost > 0 && at >= 0 && static_cast<size_t>(at) < sizeof(notReady)) {
-    snprintf(notReady + at, sizeof(notReady) - at, " carrylost=%u", indentCarryLost);
+    at += snprintf(notReady + at, sizeof(notReady) - at, " carrylost=%u", indentCarryLost);
+  }
+  // Page turns that moved fewer pages than were asked for, and presses dropped
+  // because the queue was full. Both zero in ordinary reading.
+  if ((turnsShort > 0 || turnQueue.clamped() > 0) && at >= 0 && static_cast<size_t>(at) < sizeof(notReady)) {
+    snprintf(notReady + at, sizeof(notReady) - at, " turn=%u/%u", turnsShort, turnQueue.clamped());
   }
 
   char line[224];
@@ -1655,6 +1719,13 @@ void TxtReaderActivity::render(RenderLock&&) {
 
   // Save progress
   saveProgress();
+
+  // The page is on the screen, so currentPageNextOffset is fresh and the turns
+  // that arrived while it was being drawn can be applied. Cleared last, and on
+  // every render rather than only after a turn: a render for any other reason
+  // leaves the same state behind, and waiting for a turn's own render would
+  // strand the queue if one never came.
+  renderOutstanding = false;
 }
 
 void TxtReaderActivity::renderPage() {
