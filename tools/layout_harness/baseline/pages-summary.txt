@@ -1,0 +1,34 @@
+# layout_harness pages, summary lines only.
+#
+# Corpus: the five .txt files on the development card (G:\book), with the three
+# Shift-JIS books also transcoded to UTF-8, so each book appears on both
+# conversion paths and the two must agree. The corpus is not committed; see
+# README.md. Page counts are the harness's own (uniform pitch, no ruby), so they
+# are a baseline for comparison between revisions, not a prediction of the
+# device's page numbers.
+#
+# Recorded at 38af4c6e plus the working tree of the indent-carry change.
+f8test_sjis.txt              narrow  pages=42     carrylost=0    hash=42e3ec62d8129a80
+f8test_sjis.txt              normal  pages=48     carrylost=0    hash=80a9db2cd6603cec
+f8test_sjis.txt              wide    pages=52     carrylost=0    hash=a675e7ed49a099d8
+f8test_utf8.txt              narrow  pages=42     carrylost=0    hash=42e3ec62d8129a80
+f8test_utf8.txt              normal  pages=48     carrylost=0    hash=80a9db2cd6603cec
+f8test_utf8.txt              wide    pages=52     carrylost=0    hash=a675e7ed49a099d8
+saishu_sensoron_sjis.txt     narrow  pages=166    carrylost=0    hash=03f72f4120551867
+saishu_sensoron_sjis.txt     normal  pages=193    carrylost=0    hash=6103b9522e84df0a
+saishu_sensoron_sjis.txt     wide    pages=211    carrylost=0    hash=cafade488716149c
+saishu_sensoron_utf8.txt     narrow  pages=166    carrylost=0    hash=03f72f4120551867
+saishu_sensoron_utf8.txt     normal  pages=193    carrylost=0    hash=6103b9522e84df0a
+saishu_sensoron_utf8.txt     wide    pages=211    carrylost=0    hash=cafade488716149c
+sensoshi_taikan_sjis.txt     narrow  pages=324    carrylost=0    hash=2bd9c8fd59c5ea73
+sensoshi_taikan_sjis.txt     normal  pages=378    carrylost=0    hash=c0eb5d00856dc13a
+sensoshi_taikan_sjis.txt     wide    pages=412    carrylost=0    hash=99cc276ed9ad80c8
+sensoshi_taikan_utf8.txt     narrow  pages=324    carrylost=0    hash=2bd9c8fd59c5ea73
+sensoshi_taikan_utf8.txt     normal  pages=378    carrylost=0    hash=c0eb5d00856dc13a
+sensoshi_taikan_utf8.txt     wide    pages=412    carrylost=0    hash=99cc276ed9ad80c8
+shinnihonno_shinro_sjis.txt  narrow  pages=28     carrylost=0    hash=9daed43711bf3e2a
+shinnihonno_shinro_sjis.txt  normal  pages=33     carrylost=0    hash=68907508d23e573d
+shinnihonno_shinro_sjis.txt  wide    pages=36     carrylost=0    hash=e49c4ba751fb8e2a
+shinnihonno_shinro_utf8.txt  narrow  pages=28     carrylost=0    hash=9daed43711bf3e2a
+shinnihonno_shinro_utf8.txt  normal  pages=33     carrylost=0    hash=68907508d23e573d
+shinnihonno_shinro_utf8.txt  wide    pages=36     carrylost=0    hash=e49c4ba751fb8e2a
