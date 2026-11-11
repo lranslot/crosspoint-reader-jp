@@ -11,6 +11,7 @@
 #include <HalStorage.h>
 #include <HalSystem.h>
 #include <HalTiltSensor.h>
+#include <HeapDiag.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <SPI.h>
@@ -294,6 +295,9 @@ void setup() {
   halClock.begin();
 
   LOG_INF("MAIN", "Hardware detect: %s", gpio.deviceIsX3() ? "X3" : "X4");
+  // The baseline every later reading is compared against: a conversion that
+  // fails after a book has been read succeeds from here (see HeapDiag.h).
+  heapdiag::sample("boot");
 
   // SD Card Initialization
   // We need 6 open files concurrently when parsing a new chapter

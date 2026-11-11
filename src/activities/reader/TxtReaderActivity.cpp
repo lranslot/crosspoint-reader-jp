@@ -5,6 +5,7 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <HeapDiag.h>
 #include <I18n.h>
 #include <Memory.h>
 #include <SdCardFont.h>
@@ -126,6 +127,12 @@ void TxtReaderActivity::onExit() {
     writeOpenDiagnostic();
   }
 #endif
+
+  // What one reading leaves the heap looking like. Paired with the "boot" sample
+  // this is the whole question behind the conversion abort: the glyph bitmaps a
+  // page of Japanese loads on demand are small, many, and long-lived, and the
+  // next book's conversion needs 16 KB in one piece.
+  heapdiag::sample("reader-exit");
 
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);

@@ -1,6 +1,7 @@
 #include "Txt.h"
 
 #include <FsHelpers.h>
+#include <HeapDiag.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -238,8 +239,15 @@ bool Txt::prepareEncoding() {
 
   size_t convertedSize = 0;
   if (needsCacheCopy) {
+    // Taken before and after, and on the card before the conversion starts: the
+    // reading that matters is the one from the moment the heap could not serve
+    // a 16 KB string, and a crash takes everything still in RAM with it.
+    char detail[112];
+    snprintf(detail, sizeof(detail), "src=%zu path=[%.60s]", sourceSize, filepath.c_str());
+    heapdiag::sample("pre-convert", detail);
     const bool produced = (encoding == TextEncoding::ShiftJis) ? convertToUtf8(sourceSize, convertedSize)
                                                                : stripUtf8ToCache(sourceSize, convertedSize);
+    heapdiag::sample(produced ? "post-convert" : "convert-failed", detail);
     if (!produced) {
       LOG_ERR("TXT", "Cache copy failed, reading source as-is");
       Storage.remove(getConvertedPath().c_str());
