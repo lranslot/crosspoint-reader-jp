@@ -24,6 +24,7 @@
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "VerticalWrap.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -797,17 +798,6 @@ void TxtReaderActivity::drawCheckbox(const int gutterX, const int y, const int l
     renderer.drawLine(x0, y0, x1, y1, stroke, ink);
     renderer.drawLine(x1, y0, x0, y1, stroke, ink);
   }
-}
-
-// Walks `count` UTF-8 codepoints, stopping at `len`. Returns the byte offset
-// reached, which is what the wrap loop wants.
-size_t TxtReaderActivity::advanceCodepoints(const char* text, const size_t len, const int count) {
-  size_t i = 0;
-  for (int taken = 0; taken < count && i < len; taken++) {
-    i++;
-    while (i < len && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) i++;
-  }
-  return i;
 }
 
 namespace {
@@ -1584,7 +1574,7 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       // because every codepoint occupies one cell and there is nothing to
       // measure. Both produce the same thing: how many bytes go in this unit.
       size_t breakPos =
-          isVertical ? advanceCodepoints(segment, segmentLen, std::max(1, charsPerUnit - indentCells))
+          isVertical ? vertwrap::advanceCodepoints(segment, segmentLen, std::max(1, charsPerUnit - indentCells))
                      : renderer.findWrapOffset(cachedFontId, segment, viewportWidth - indentPx, EpdFontFamily::REGULAR);
 
       // The ruby strip is reserved before the line is admitted, because what it

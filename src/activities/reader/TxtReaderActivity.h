@@ -327,10 +327,10 @@ class TxtReaderActivity final : public Activity {
   static_assert(std::size(COLUMN_RATIO_PERCENT) == CrossPointSettings::LINE_COMPRESSION_COUNT,
                 "COLUMN_RATIO_PERCENT needs one column pitch per CrossPointSettings::LINE_COMPRESSION step");
 
-  // Advance `count` codepoints from `text`, stopping at `len`. Vertical writing
-  // breaks on a character count, not a measured width: every codepoint takes one
-  // cell, so there is nothing to measure.
-  static size_t advanceCodepoints(const char* text, size_t len, int count);
+  // Vertical writing breaks on a character count, not a measured width: every
+  // codepoint takes one cell, so there is nothing to measure. The rule itself is
+  // vertwrap::advanceCodepoints() in VerticalWrap.h, so tools/layout_harness can
+  // drive the real one rather than a copy.
   int markerWidth = 0;  // gutter reserved for the checkbox, measured from "> "
   std::vector<CheckboxRef> pageCheckboxes;
   int selectedCheckbox = -1;
