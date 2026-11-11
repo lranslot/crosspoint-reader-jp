@@ -140,6 +140,14 @@ class TxtReaderActivity final : public Activity {
   uint16_t boutenVariant = 0;   // a kind beyond the two shapes we cut
   uint16_t boutenCollide = 0;   // ruby on the same characters, so no dots
   uint16_t boutenNoParent = 0;  // the quoted string was not there to match
+#if READER_OPEN_DIAG
+  // Whether this open already has a line on the card, so the next write replaces
+  // it instead of adding one. The "boot" flag is latched with it: APP_STATE
+  // consumes the flag on the first write, and the replacement has to keep saying
+  // what opened the book.
+  bool diagLineWritten = false;
+  bool diagBootOpen = false;
+#endif
   bool initialized = false;
   // Set when an index cache existed but failed validation, i.e. a setting changed
   // under a book that had already been indexed. Distinguishes a rebuild from a
@@ -345,8 +353,11 @@ class TxtReaderActivity final : public Activity {
 
   void initializeReader();
 #if READER_OPEN_DIAG
-  // Appends one line to /reader-open.txt per book opened. [env:default] only.
-  void writeOpenDiagnostic() const;
+  // One line in /reader-open.txt per book opened, rewritten in place rather than
+  // appended a second time: the open is announced before anything is laid out so
+  // a crash still leaves a line, then the same line is replaced on close with the
+  // counters the reading actually produced. [env:default] only.
+  void writeOpenDiagnostic();
 #endif
   // outCheckboxes is only passed by render(); buildPageIndex() sweeps every page
   // and must not pay for checkbox scanning.

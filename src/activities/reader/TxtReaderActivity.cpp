@@ -115,6 +115,16 @@ void TxtReaderActivity::onEnter() {
 void TxtReaderActivity::onExit() {
   Activity::onExit();
 
+#if READER_OPEN_DIAG
+  // Before anything is torn down, and only when the open was announced: replaces
+  // that line with the same fields, now carrying the counters this reading
+  // produced. The open-time line has no bt= worth reading -- at the point it is
+  // written nothing has been laid out yet.
+  if (diagLineWritten && txt) {
+    writeOpenDiagnostic();
+  }
+#endif
+
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
@@ -308,7 +318,7 @@ void TxtReaderActivity::loop() {
 // Accumulated, never truncated: the failure is intermittent, so a good open and
 // a bad one have to sit next to each other to be compared. Guarded by
 // READER_OPEN_DIAG, which only [env:default] defines.
-void TxtReaderActivity::writeOpenDiagnostic() const {
+void TxtReaderActivity::writeOpenDiagnostic() {
   // Format first: nothing already on the card is disturbed until there is a new
   // line worth keeping.
   const std::string& path = txt->getPath();
@@ -321,16 +331,24 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
   // gr/gf are running totals for the session, not for this open: glyphs are read
   // while the page is drawn, which is after this line is written. The difference
   // between two consecutive lines is what happened between those two opens.
+  //
+  // bt= is the opposite: it counts this book only, and it is zero until pages have
+  // been laid out. That is why the line is written twice -- once here, where the
+  // open is announced and bt= is necessarily 0/0/0/0, and again from onExit(),
+  // which replaces it with the totals. A line still reading 0/0/0/0 next to a
+  // timestamp near the boot time therefore means the session never reached
+  // onExit(): it crashed, or the device is still in that book.
+  const bool bootOpen = diagLineWritten ? diagBootOpen : APP_STATE.bootOpenedReader;
   char line[224];
   const int n =
       snprintf(line, sizeof(line),
                "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u bt=%u/%u/%u/%u "
                "path=[%.60s]\n",
-               static_cast<unsigned long>(millis()), APP_STATE.bootOpenedReader ? "boot" : "library",
-               isMarkdown ? 1 : 0, static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0,
-               static_cast<unsigned>(path.size()), wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId,
-               viewportWidth, viewportHeight, pageExtent / normalPitch, SdCardFont::glyphRetries(),
-               SdCardFont::glyphFailures(), boutenDrawn, boutenVariant, boutenCollide, boutenNoParent, path.c_str());
+               static_cast<unsigned long>(millis()), bootOpen ? "boot" : "library", isMarkdown ? 1 : 0,
+               static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0, static_cast<unsigned>(path.size()),
+               wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId, viewportWidth, viewportHeight,
+               pageExtent / normalPitch, SdCardFont::glyphRetries(), SdCardFont::glyphFailures(), boutenDrawn,
+               boutenVariant, boutenCollide, boutenNoParent, path.c_str());
   if (n <= 0) {
     return;
   }
@@ -367,6 +385,17 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
           keptFrom++;
         }
       }
+      // This open already announced itself, so the line about to be written is a
+      // replacement, not a second entry: drop the trailing one. Trimming the kept
+      // buffer rather than seeking keeps the file at one line per open, which is
+      // the only thing anything reading it relies on.
+      if (diagLineWritten && keptLen > keptFrom) {
+        size_t cut = keptLen - 1;  // the newline the last line ends with
+        while (cut > keptFrom && kept[cut - 1] != '\n') {
+          cut--;
+        }
+        keptLen = cut;
+      }
       in.close();  // must close before reopening the same path for write
     }
   }
@@ -379,7 +408,10 @@ void TxtReaderActivity::writeOpenDiagnostic() const {
     file.write(kept.get() + keptFrom, keptLen - keptFrom);
   }
   file.write(line, lineLen);
-  // Consume the flag: only the book the boot opened by itself gets "boot".
+  // Consume the flag: only the book the boot opened by itself gets "boot". Latched
+  // first, because the replacement written on close has to report the same thing.
+  diagBootOpen = bootOpen;
+  diagLineWritten = true;
   APP_STATE.bootOpenedReader = false;
 }
 #endif
