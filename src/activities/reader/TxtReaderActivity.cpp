@@ -243,12 +243,25 @@ void TxtReaderActivity::loop() {
   // array out from under a concurrent read) and seeks the shared sequential read
   // handle. Skipped rather than waited on when a render already holds the lock —
   // the next pass will pick it up, and blocking here would stall input.
+  //
+  // `initialized` is the other half of that: initializeReader() is called from
+  // render(), so it runs on the render task, and until it has run the viewport is
+  // still zero. onEnter() only sets requestedUpdate, so the notify to the render
+  // task does not go out until the end of ActivityManager::loop(); that leaves a
+  // window where this pass reaches the index extension before the render task has
+  // taken the lock, and lays a page out against a budget of nothing. That is what
+  // crashed the reader on open -- see PageBudget.h.
+  //
+  // Read unsynchronised here on purpose, exactly as indexComplete is: it is a
+  // hint, and a stale one costs a skipped tick. The decision is the re-check
+  // below, which the lock orders -- initializeReader() runs under this same
+  // RenderLock, so acquiring it happens after the write of every field it sets.
   bool indexJustCompleted = false;
-  if (!indexComplete && !RenderLock::peek()) {
+  if (initialized && !indexComplete && !RenderLock::peek()) {
     RenderLock lock;
     // Re-check under the lock: peek() and acquisition are not atomic, and render()
     // can finish the index itself between the two.
-    if (!indexComplete) {
+    if (initialized && !indexComplete) {
       indexJustCompleted = advanceIndex(1);
     }
   }
