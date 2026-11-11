@@ -524,14 +524,24 @@ void Txt::logAozoraResult(const size_t sourceSize, const size_t convertedSize, c
         if (read <= 0) break;
         std::string window = tail;
         window.append(reinterpret_cast<const char*>(buf.get()), static_cast<size_t>(read));
+        // The overlap exists so a marker split across two reads is still seen, but
+        // a marker lying wholly inside it was already counted by the read that
+        // produced it; counted again, it doubles. A 3-byte close bracket four
+        // bytes before an 8 KB boundary is what made saishu_sensoron.txt report
+        // 44 opens against 45 closes and look like malformed markup.
+        //
+        // So a match counts only when it reaches past the carried-over bytes.
+        // carried is 0 on the first read, which makes every match there count.
+        const size_t carried = tail.size();
         for (size_t i = 0; i < window.size(); i++) {
           const char* p = window.data() + i;
           const size_t remain = window.size() - i;
-          if (remain >= 6 && memcmp(p, "\xEF\xBC\xBB\xEF\xBC\x83", 6) == 0) noteOpen++;
-          if (remain >= 3 && memcmp(p, "\xE3\x80\x8A", 3) == 0) rubyOpen++;
-          if (remain >= 3 && memcmp(p, "\xE3\x80\x8B", 3) == 0) rubyClose++;
-          if (remain >= 3 && memcmp(p, "\xEF\xBD\x9C", 3) == 0) range++;
-          if (remain >= 3 && memcmp(p, "\xE2\x80\xBB", 3) == 0) kome++;
+          const auto fresh = [&](const size_t markerLen) { return i + markerLen > carried; };
+          if (remain >= 6 && fresh(6) && memcmp(p, "\xEF\xBC\xBB\xEF\xBC\x83", 6) == 0) noteOpen++;
+          if (remain >= 3 && fresh(3) && memcmp(p, "\xE3\x80\x8A", 3) == 0) rubyOpen++;
+          if (remain >= 3 && fresh(3) && memcmp(p, "\xE3\x80\x8B", 3) == 0) rubyClose++;
+          if (remain >= 3 && fresh(3) && memcmp(p, "\xEF\xBD\x9C", 3) == 0) range++;
+          if (remain >= 3 && fresh(3) && memcmp(p, "\xE2\x80\xBB", 3) == 0) kome++;
         }
         if (window.size() >= 8) {
           tail = window.substr(window.size() - 8);
