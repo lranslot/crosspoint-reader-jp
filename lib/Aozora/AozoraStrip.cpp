@@ -8,16 +8,16 @@ namespace {
 
 // UTF-8 spellings of the notation. Written as escapes rather than literals so the
 // encoding of this source file cannot change their meaning.
-constexpr char KOME[] = "\xE2\x80\xBB";        // ※ U+203B
+constexpr char KOME[] = "\xE2\x80\xBB";                   // ※ U+203B
 constexpr char NOTE_OPEN[] = "\xEF\xBC\xBB\xEF\xBC\x83";  // ［＃ U+FF3B U+FF03
-constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";  // ］ U+FF3D
-constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";   // 《 U+300A
-constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";  // ｜ U+FF5C
-constexpr char GETA[] = "\xE3\x80\x93";        // 〓 U+3013
-constexpr char KAGI_OPEN[] = "\xE3\x80\x8C";   // 「 U+300C
-constexpr char KAGI_CLOSE[] = "\xE3\x80\x8D";  // 」 U+300D
-constexpr char NI[] = "\xE3\x81\xAB";          // に U+306B
-constexpr char BOUTEN[] = "\xE5\x82\x8D\xE7\x82\xB9";  // 傍点
+constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";             // ］ U+FF3D
+constexpr char RUBY_OPEN[] = "\xE3\x80\x8A";              // 《 U+300A
+constexpr char RANGE_MARK[] = "\xEF\xBD\x9C";             // ｜ U+FF5C
+constexpr char GETA[] = "\xE3\x80\x93";                   // 〓 U+3013
+constexpr char KAGI_OPEN[] = "\xE3\x80\x8C";              // 「 U+300C
+constexpr char KAGI_CLOSE[] = "\xE3\x80\x8D";             // 」 U+300D
+constexpr char NI[] = "\xE3\x81\xAB";                     // に U+306B
+constexpr char BOUTEN[] = "\xE5\x82\x8D\xE7\x82\xB9";     // 傍点
 
 constexpr size_t KAGI_OPEN_LEN = 3;
 constexpr size_t KAGI_CLOSE_LEN = 3;
@@ -45,8 +45,7 @@ bool matches(const char* p, const size_t remain, const char* pattern, const size
 // Returns the offset of the match, or npos. `hitNewline` reports whether the line
 // ended first, which distinguishes "not closed on this line" (leave the text
 // alone) from "might close in the next chunk" (hold it back).
-size_t findInLine(const char* p, const size_t remain, const char* pattern, const size_t patternLen,
-                  bool& hitNewline) {
+size_t findInLine(const char* p, const size_t remain, const char* pattern, const size_t patternLen, bool& hitNewline) {
   hitNewline = false;
   for (size_t i = 0; i < remain; i++) {
     if (p[i] == '\n') {
@@ -338,8 +337,21 @@ void AozoraStrip::beginContent() {
   lineOut_.append(NOTE_CLOSE, NOTE_CLOSE_LEN);
 }
 
+void AozoraStrip::reserveForChunk(const size_t maxChunkBytes) { buffer_.reserve(maxChunkBytes + MAX_CARRY); }
+
 size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, const bool atEnd) {
   // Anything held back last time belongs in front of this chunk.
+  //
+  // Reserved before either branch touches it, and to the exact figure this scan
+  // can ever need: one chunk plus the most a carry is allowed to hold (MAX_CARRY
+  // bounds it, so this is not a guess). Without it the first chunk sized the
+  // buffer at exactly one chunk, and the first chunk that arrived behind a carry
+  // asked for one byte more than that -- which libstdc++ serves by doubling, so
+  // an 8,205-byte need became a 16,385-byte request. That request is what aborted
+  // the reader at 537 s on a heap fragmented by a page of Japanese
+  // (crash_report.txt, firmware 1.5.0-dev-main-e14f93e4). Asked for once, up
+  // front, the size no longer depends on the growth policy at all.
+  buffer_.reserve(len + MAX_CARRY);
   if (carry_.empty()) {
     buffer_.assign(in, len);
   } else {
@@ -411,7 +423,8 @@ size_t AozoraStrip::process(const char* in, const size_t len, std::string& out, 
     // 2. Annotation: ［＃…］ — dropped entirely.
     if (matches(p, remain, NOTE_OPEN, NOTE_OPEN_LEN)) {
       bool hitNewline = false;
-      const size_t close = findInLine(p + NOTE_OPEN_LEN, remain - NOTE_OPEN_LEN, NOTE_CLOSE, NOTE_CLOSE_LEN, hitNewline);
+      const size_t close =
+          findInLine(p + NOTE_OPEN_LEN, remain - NOTE_OPEN_LEN, NOTE_CLOSE, NOTE_CLOSE_LEN, hitNewline);
       if (close == std::string::npos) {
         if (!hitNewline && !atEnd && remain < MAX_CARRY) {
           carry_.assign(p, remain);

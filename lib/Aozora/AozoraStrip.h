@@ -69,6 +69,19 @@ class AozoraStrip {
   // its closing rule.
   void setHeaderRange(size_t firstLine, size_t secondLine);
 
+  // Size the internal scan buffer for the largest chunk the caller will ever
+  // feed, once, before the first process() call.
+  //
+  // Without it the buffer is sized by the first chunk and then has to grow by one
+  // carry's worth the first time a chunk arrives behind one, which libstdc++
+  // serves by doubling: an 8,205-byte need became a 16,385-byte request, and that
+  // request is what aborted the reader on a heap fragmented by a page of Japanese
+  // (crash_report.txt, 1.5.0-dev-main-e14f93e4). Reserving per chunk instead is
+  // not enough -- MSVC's reserve() applies the same geometric rule, so a figure
+  // that creeps up with the data still overshoots. One call with a constant is
+  // the only form whose request size is the same on both standard libraries.
+  void reserveForChunk(size_t maxChunkBytes);
+
   // Append the stripped form of `in` to `out`.
   //
   // Returns how many bytes were held back for the next call. `atEnd` marks the
@@ -94,15 +107,15 @@ class AozoraStrip {
   // the same bytes whatever size the caller happens to read in.
   static constexpr size_t MAX_LINE_HOLD = 4096;
   std::string lineOut_;
-  size_t rangeIndent_ = 0;        // ［＃ここからN字下げ］ in force, 0 when none
-  size_t rangeHanging_ = 0;       // 、折り返してM字下げ of that range, 0 when none
-  size_t lineIndent_ = 0;         // ［＃N字下げ］ seen on this line, overrides the range
-  size_t lineHanging_ = 0;        // hanging indent of this line's own notation
+  size_t rangeIndent_ = 0;         // ［＃ここからN字下げ］ in force, 0 when none
+  size_t rangeHanging_ = 0;        // 、折り返してM字下げ of that range, 0 when none
+  size_t lineIndent_ = 0;          // ［＃N字下げ］ seen on this line, overrides the range
+  size_t lineHanging_ = 0;         // hanging indent of this line's own notation
   bool lineHasOwnIndent_ = false;  // a line-level ［＃N字下げ］ was seen on this line
-  bool headingLine_ = false;      // a block heading was named on this line
-  bool blankBeforeNext_ = false;  // the line just flushed was a block heading
-  bool lastLineBlank_ = true;     // true at the start of a file: no leading blank
-  bool lineReleased_ = false;     // this line outgrew MAX_LINE_HOLD
+  bool headingLine_ = false;       // a block heading was named on this line
+  bool blankBeforeNext_ = false;   // the line just flushed was a block heading
+  bool lastLineBlank_ = true;      // true at the start of a file: no leading blank
+  bool lineReleased_ = false;      // this line outgrew MAX_LINE_HOLD
 
   // Append the held line to `out`, inserting a blank line in front of it when a
   // block heading needs one and the file does not already have it.

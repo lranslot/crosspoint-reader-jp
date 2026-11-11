@@ -318,6 +318,15 @@ bool Txt::convertToUtf8(const size_t sourceSize, size_t& convertedSize) {
   std::string encoded;
   encoded.reserve(CONVERT_CHUNK * 3 / 2);  // kana and kanji grow 1:2 and 2:3
   std::string stripped;
+  // Reserved up front for the same reason as AozoraStrip::buffer_: growing it by
+  // doubling turns a 13 KB need into a 24 KB request, and what fails on a
+  // fragmented heap is the single largest block, not the total. Here the strip
+  // is fed the transcoded chunk, which is already up to half again the size of
+  // the Shift-JIS it came from, and can add a normalised indent notation per
+  // line on top. Measured peak over the corpus: 13,275 bytes out of a
+  // 12,277-byte chunk, so a quarter is headroom rather than the expectation
+  // (tools/layout_harness alloc).
+  stripped.reserve(encoded.capacity() + encoded.capacity() / 4);
 
   // Second, independent carry. The first (inside cp932ToUtf8) holds back a
   // Shift-JIS pair split across a read; this one holds back markup split across
@@ -326,6 +335,8 @@ bool Txt::convertToUtf8(const size_t sourceSize, size_t& convertedSize) {
   if (stripAozora && aozoraHeaderFound) {
     strip.setHeaderRange(aozoraHeaderFirst, aozoraHeaderLast);
   }
+  // The strip is fed the transcoded chunk, so its bound is the encoder's output.
+  strip.reserveForChunk(CONVERT_CHUNK * 3 / 2);
 
   size_t carry = 0;  // bytes held back because a pair straddled the chunk edge
   size_t inputBytes = 0;
@@ -446,8 +457,16 @@ bool Txt::stripUtf8ToCache(const size_t sourceSize, size_t& convertedSize) {
   if (aozoraHeaderFound) {
     strip.setHeaderRange(aozoraHeaderFirst, aozoraHeaderLast);
   }
+  strip.reserveForChunk(CONVERT_CHUNK);
 
   std::string stripped;
+  // Reserved up front for the same reason as AozoraStrip::buffer_: growing it by
+  // doubling turns a 9 KB need into a 16 KB request, and what fails on a
+  // fragmented heap is the single largest block, not the total. The strip can
+  // add bytes rather than only remove them -- a normalised indent notation per
+  // line, blank lines around headings. Measured peak over the corpus: 9,392
+  // bytes out of an 8,192-byte chunk (tools/layout_harness alloc).
+  stripped.reserve(CONVERT_CHUNK + CONVERT_CHUNK / 4);
   size_t inputBytes = 0;
   size_t outputBytes = 0;
   bool ok = true;
