@@ -17,6 +17,7 @@
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "PageBudget.h"
 #include "ProgressFile.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
@@ -352,16 +353,23 @@ void TxtReaderActivity::writeOpenDiagnostic() {
   // timestamp near the boot time therefore means the session never reached
   // onExit(): it crashed, or the device is still in that book.
   const bool bootOpen = diagLineWritten ? diagBootOpen : APP_STATE.bootOpenedReader;
+  // Appended only when it is non-zero, so an ordinary line is byte for byte the
+  // shape it has always been and an abnormal one is unmistakable.
+  char notReady[24] = "";
+  if (geometryNotReady > 0) {
+    snprintf(notReady, sizeof(notReady), " notready=%u", geometryNotReady);
+  }
+
   char line[224];
-  const int n =
-      snprintf(line, sizeof(line),
-               "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u bt=%u/%u/%u/%u "
-               "path=[%.60s]\n",
-               static_cast<unsigned long>(millis()), bootOpen ? "boot" : "library", isMarkdown ? 1 : 0,
-               static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0, static_cast<unsigned>(path.size()),
-               wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId, viewportWidth, viewportHeight,
-               pageExtent / normalPitch, SdCardFont::glyphRetries(), SdCardFont::glyphFailures(), boutenDrawn,
-               boutenVariant, boutenCollide, boutenNoParent, path.c_str());
+  const int n = snprintf(
+      line, sizeof(line),
+      "%lu open=%s md=%d vw=%d vert=%d len=%u font=%s/%s id=%d vp=%dx%d n=%d gr=%u gf=%u bt=%u/%u/%u/%u"
+      "%s path=[%.60s]\n",
+      static_cast<unsigned long>(millis()), bootOpen ? "boot" : "library", isMarkdown ? 1 : 0,
+      static_cast<int>(SETTINGS.verticalWriting), isVertical ? 1 : 0, static_cast<unsigned>(path.size()),
+      wanted[0] ? wanted : "-", loaded[0] ? loaded : "-", cachedFontId, viewportWidth, viewportHeight,
+      PageBudget(pageExtent, normalPitch).linesAtFloor(), SdCardFont::glyphRetries(), SdCardFont::glyphFailures(),
+      boutenDrawn, boutenVariant, boutenCollide, boutenNoParent, notReady, path.c_str());
   if (n <= 0) {
     return;
   }
@@ -660,6 +668,17 @@ bool TxtReaderActivity::advanceIndex(const int maxPages) {
   if (indexComplete) {
     return true;
   }
+  // Never against an unmeasured viewport: a zero budget admits every line of the
+  // chunk. Deferred, not finished -- marking the index complete here would leave
+  // the book at one page for as long as it stays open, and that is worse than a
+  // tick spent doing nothing. The `initialized` guard in loop() makes this
+  // unreachable; this is the net under it, and the counter says if it ever held.
+  if (!PageBudget(pageExtent, normalPitch).usable()) {
+    LOG_ERR("TRS", "Index asked before the viewport was measured; deferring");
+    geometryNotReady++;
+    return false;
+  }
+
   const size_t fileSize = txt->getFileSize();
 
   // Reuse one handle across the pages laid out here. beginSequentialRead() is a
@@ -1314,15 +1333,26 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
   // How much of the page's budget has been spent. Replaces the line count: with
   // every pitch equal it reaches exactly the old pageExtent / normalPitch lines,
   // which is why keeping ruby out of a book changes nothing about its pages.
-  int usedExtent = 0;
+  PageBudget budget(pageExtent, normalPitch);
   bool pageFull = false;
+
+  // The invariant, stated where it can still be acted on. Reaching here without
+  // a measured viewport is a caller ordering mistake; laying out anyway is what
+  // ran the heap out. Refused loudly and counted rather than returned as an empty
+  // page, because advanceIndex() reads an empty page as the end of the file and
+  // would freeze the book at one page -- a quiet wrong answer in place of a loud
+  // crash is not an improvement.
+  if (!budget.usable()) {
+    LOG_ERR("TRS", "Page asked before the viewport was measured (extent %d, pitch %d)", pageExtent, normalPitch);
+    geometryNotReady++;
+    return false;
+  }
 
   // Admit one line of the given height, or report that the page is full. The
   // first line of a page is always admitted: a pitch taller than the whole
   // viewport must still make progress, or the reader stops at that line forever.
   const auto admit = [&](const char* text, const size_t len, const LineAttr attr) {
-    const int pitch = pitchOf(attr);
-    if (!outLines.empty() && usedExtent + pitch > pageExtent) {
+    if (!budget.admit(pitchOf(attr))) {
       pageFull = true;
       return false;
     }
@@ -1332,7 +1362,6 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       outLines.emplace_back(text, len);
     }
     attrs.push_back(attr);
-    usedExtent += pitch;
     return true;
   };
   const size_t fileSize = txt->getFileSize();

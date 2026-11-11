@@ -140,6 +140,11 @@ class TxtReaderActivity final : public Activity {
   uint16_t boutenVariant = 0;   // a kind beyond the two shapes we cut
   uint16_t boutenCollide = 0;   // ruby on the same characters, so no dots
   uint16_t boutenNoParent = 0;  // the quoted string was not there to match
+  // Times page assembly was asked for with no viewport behind it. Expected to
+  // stay 0 forever: loop() will not ask before initializeReader() has run. A
+  // non-zero value means that ordering broke again, so it is reported rather
+  // than only logged -- serial output does not reach this device's user.
+  uint16_t geometryNotReady = 0;
 #if READER_OPEN_DIAG
   // Whether this open already has a line on the card, so the next write replaces
   // it instead of adding one. The "boot" flag is latched with it: APP_STATE
