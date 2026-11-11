@@ -145,6 +145,11 @@ class TxtReaderActivity final : public Activity {
   // non-zero value means that ordering broke again, so it is reported rather
   // than only logged -- serial output does not reach this device's user.
   uint16_t geometryNotReady = 0;
+  // Pages whose first line is a continuation whose head lies further back than
+  // INDENT_CARRY_MAX_BACK, so its indent could not be recovered and the line was
+  // laid out at the margin. Reported rather than only logged, for the same
+  // reason as above: a silent wrong indent is how stage 2g's bug survived.
+  uint16_t indentCarryLost = 0;
 #if READER_OPEN_DIAG
   // Whether this open already has a line on the card, so the next write replaces
   // it instead of adding one. The "boot" flag is latched with it: APP_STATE
@@ -224,13 +229,18 @@ class TxtReaderActivity final : public Activity {
   void stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText,
                          std::vector<BoutenSpan>& bouten);
 
-  // Read the indent marker AozoraStrip writes at the head of an indented line —
-  // ［＃N字下げ］ or ［＃N字下げ、折り返してM字下げ］ — and return how many bytes it
-  // spans, 0 when the line has none. The marker is left in the line rather than
-  // removed: the caller skips it the same way it skips a task-list marker, so no
-  // byte of the file is unaccounted for and the page index keeps naming real
-  // offsets.
-  static size_t parseIndentNotation(const std::string& line, uint8_t& indent, uint8_t& hanging);
+  // The indent marker AozoraStrip writes at the head of an indented line —
+  // ［＃N字下げ］ or ［＃N字下げ、折り返してM字下げ］ — is read by
+  // aozora::parseIndentNotation() in AozoraIndent.h. The marker is left in the
+  // line rather than removed: the caller skips it the same way it skips a
+  // task-list marker, so no byte of the file is unaccounted for and the page
+  // index keeps naming real offsets.
+  //
+  // Cells a page owes its first line because that line is the *continuation* of
+  // an indented line whose head is on an earlier page. Returns false when the
+  // page begins at a line head (nothing to carry) or when the head could not be
+  // reached; `cells` is already clamped to this viewport. See stage 2i.
+  [[nodiscard]] bool recoverIndentCarry(size_t offset, int& cells);
 
   // Cells of text a line must keep whatever the notation asks for. Aozora writes
   // ［＃ここから１９字下げ］ to fake right-alignment against its own line length, not

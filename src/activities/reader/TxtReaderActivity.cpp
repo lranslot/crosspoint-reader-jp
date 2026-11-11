@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "AozoraIndent.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
@@ -42,7 +43,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // from an estimate, which moves rubyPitch and so moves where pages break.
 // 10: an indent is a line attribute and spends cells out of the line's budget.
 // 11: a line carrying emphasis dots reserves a band for them (A7).
-constexpr uint8_t CACHE_VERSION = 11;
+constexpr uint8_t CACHE_VERSION = 12;
 
 // --- A7: the emphasis marks, cut by hand ---
 //
@@ -355,9 +356,13 @@ void TxtReaderActivity::writeOpenDiagnostic() {
   const bool bootOpen = diagLineWritten ? diagBootOpen : APP_STATE.bootOpenedReader;
   // Appended only when it is non-zero, so an ordinary line is byte for byte the
   // shape it has always been and an abnormal one is unmistakable.
-  char notReady[24] = "";
+  char notReady[48] = "";
+  int at = 0;
   if (geometryNotReady > 0) {
-    snprintf(notReady, sizeof(notReady), " notready=%u", geometryNotReady);
+    at += snprintf(notReady + at, sizeof(notReady) - at, " notready=%u", geometryNotReady);
+  }
+  if (indentCarryLost > 0 && at >= 0 && static_cast<size_t>(at) < sizeof(notReady)) {
+    snprintf(notReady + at, sizeof(notReady) - at, " carrylost=%u", indentCarryLost);
   }
 
   char line[224];
@@ -1238,55 +1243,88 @@ void TxtReaderActivity::drawBoutenVertical(const std::string& column, const Line
   }
 }
 
-size_t TxtReaderActivity::parseIndentNotation(const std::string& line, uint8_t& indent, uint8_t& hanging) {
-  // ［＃ U+FF3B U+FF03, ］ U+FF3D, 字下げ, 、折り返して — bytes, not literals, so the
-  // encoding of this file cannot change what they mean. Must stay the spelling
-  // AozoraStrip::beginContent() writes.
-  static constexpr char NOTE_OPEN[] = "\xEF\xBC\xBB\xEF\xBC\x83";
-  static constexpr char NOTE_CLOSE[] = "\xEF\xBC\xBD";
-  static constexpr char JISAGE[] = "\xE5\xAD\x97\xE4\xB8\x8B\xE3\x81\x92";
-  static constexpr char ORIKAESHI[] = "\xE3\x80\x81\xE6\x8A\x98\xE3\x82\x8A\xE8\xBF\x94\xE3\x81\x97\xE3\x81\xA6";
-  static constexpr size_t NOTE_OPEN_LEN = 6;
-  static constexpr size_t NOTE_CLOSE_LEN = 3;
-  static constexpr size_t JISAGE_LEN = 9;
-  static constexpr size_t ORIKAESHI_LEN = 18;
+// How far back the head of a source line is looked for. A 青空文庫 paragraph is
+// one line, so this is a paragraph length, not a display line: 8 KB is longer
+// than any paragraph in the corpus (the longest measured is under 3 KB) and is
+// the same figure the forward read already uses.
+namespace {
+constexpr size_t INDENT_CARRY_MAX_BACK = 8 * 1024;
+constexpr size_t INDENT_CARRY_STEP = 512;
+// The notation is at most ［＃NNN字下げ、折り返してMMM字下げ］ = 54 bytes. Read a
+// little more than that so a malformed one is rejected by the parser rather
+// than by the window ending early.
+constexpr size_t INDENT_CARRY_HEAD = 96;
+}  // namespace
 
-  indent = 0;
-  hanging = 0;
-  const size_t len = line.size();
-  if (len < NOTE_OPEN_LEN || memcmp(line.data(), NOTE_OPEN, NOTE_OPEN_LEN) != 0) return 0;
+bool TxtReaderActivity::recoverIndentCarry(const size_t offset, int& cells) {
+  cells = 0;
+  if (offset == 0) return false;  // the file starts at a line head by definition
 
-  // One full-width digit run, then 字下げ. Reading digits only where the grammar
-  // puts them is what keeps ［＃ここから１字下げ、折り返して２字下げ］ from being read
-  // as a single twelve-cell indent (the mistake the F-8 survey script made).
-  const auto readNumber = [&](size_t& at, unsigned& value) {
-    const size_t from = at;
-    value = 0;
-    while (at + 3 <= len && static_cast<uint8_t>(line[at]) == 0xEF && static_cast<uint8_t>(line[at + 1]) == 0xBC &&
-           static_cast<uint8_t>(line[at + 2]) >= 0x90 && static_cast<uint8_t>(line[at + 2]) <= 0x99) {
-      value = value * 10 + static_cast<unsigned>(static_cast<uint8_t>(line[at + 2]) - 0x90);
-      at += 3;
-    }
-    return at > from;
-  };
-  const auto expect = [&](size_t& at, const char* want, const size_t wantLen) {
-    if (len - at < wantLen || memcmp(line.data() + at, want, wantLen) != 0) return false;
-    at += wantLen;
-    return true;
-  };
-
-  size_t at = NOTE_OPEN_LEN;
-  unsigned n = 0;
-  if (!readNumber(at, n) || !expect(at, JISAGE, JISAGE_LEN)) return 0;
-  unsigned m = 0;
-  if (expect(at, ORIKAESHI, ORIKAESHI_LEN)) {
-    if (!readNumber(at, m) || !expect(at, JISAGE, JISAGE_LEN)) return 0;
+  // Walk back towards the head of the line this page starts inside. One 512-byte
+  // step covers the common case; a long paragraph costs a few more. Both the
+  // index pass and render() come through here, so what they find is the same
+  // number by construction -- which is the whole reason the carry is recovered
+  // from the file rather than remembered in RAM between pages.
+  auto window = makeUniqueNoThrow<uint8_t[]>(INDENT_CARRY_STEP);
+  if (!window) {
+    LOG_ERR("TRS", "OOM: %zu bytes for the indent carry window", INDENT_CARRY_STEP);
+    return false;
   }
-  if (!expect(at, NOTE_CLOSE, NOTE_CLOSE_LEN)) return 0;
 
-  indent = static_cast<uint8_t>(std::min(n, 255u));
-  hanging = static_cast<uint8_t>(std::min(m, 255u));
-  return at;
+  size_t lineStart = 0;
+  bool haveLineStart = false;
+  size_t scanned = 0;
+  while (scanned < INDENT_CARRY_MAX_BACK && scanned < offset) {
+    const size_t want = std::min(INDENT_CARRY_STEP, offset - scanned);
+    const size_t from = offset - scanned - want;
+    if (!txt->readContent(window.get(), from, want)) return false;
+    const size_t found =
+        aozora::findSourceLineStart(reinterpret_cast<const char*>(window.get()), want, /*atFileStart=*/from == 0);
+    if (found == want) {
+      // The line starts where this window ends. On the first window that is the
+      // page start itself, so the page begins at a line head and owes nothing.
+      // On any later window it is a line start further back, and must not be
+      // read as the first case -- a newline at a 512-byte step boundary is an
+      // ordinary newline.
+      if (scanned == 0) return false;
+      lineStart = from + want;
+      haveLineStart = true;
+      break;
+    }
+    if (found != aozora::NO_LINE_START) {
+      lineStart = from + found;
+      haveLineStart = true;
+      break;
+    }
+    scanned += want;
+  }
+  if (!haveLineStart) {
+    // The head is further back than we were willing to read. The line is laid
+    // out at the margin, which is the old (wrong) behaviour -- said out loud
+    // rather than guessed at, because this is exactly the shape of bug that
+    // stage 2g shipped with.
+    LOG_ERR("TRS", "Indent carry: no line head within %zu bytes of %zu", INDENT_CARRY_MAX_BACK, offset);
+    indentCarryLost++;
+    return false;
+  }
+
+  // The head of the line is where the notation is, if there is one.
+  const size_t headLen = std::min(INDENT_CARRY_HEAD, offset - lineStart);
+  if (headLen < aozora::NOTE_OPEN_LEN) return false;
+  auto head = makeUniqueNoThrow<uint8_t[]>(headLen);
+  if (!head) {
+    LOG_ERR("TRS", "OOM: %zu bytes for the indent carry head", headLen);
+    return false;
+  }
+  if (!txt->readContent(head.get(), lineStart, headLen)) return false;
+
+  uint8_t askedIndent = 0;
+  uint8_t askedHanging = 0;
+  if (aozora::parseIndentNotation(reinterpret_cast<const char*>(head.get()), headLen, askedIndent, askedHanging) == 0) {
+    return false;
+  }
+  cells = clampIndent(aozora::carryCells(askedIndent, askedHanging));
+  return cells > 0;
 }
 
 int TxtReaderActivity::clampIndent(const int cells) const {
@@ -1395,6 +1433,14 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     renderer.ensureSdCardFontReady(cachedFontId, reinterpret_cast<const char*>(buffer), /*styleMask=*/0x01);
   }
 
+  // What the first line of this page owes because it is the continuation of an
+  // indented line that began on an earlier page. Recovered once per page, before
+  // anything is laid out, and consumed by the first source line only.
+  int carriedIndent = 0;
+  if (aozoraMarkup && !isMarkdown && offset > 0) {
+    if (!recoverIndentCarry(offset, carriedIndent)) carriedIndent = 0;
+  }
+
   // Parse lines from buffer
   size_t pos = 0;
 
@@ -1448,13 +1494,21 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       // the offsets here and the wrap below are in the same (stripped) space.
       uint8_t askedIndent = 0;
       uint8_t askedHanging = 0;
-      prefixLen = parseIndentNotation(line, askedIndent, askedHanging);
+      prefixLen = aozora::parseIndentNotation(line.data(), line.size(), askedIndent, askedHanging);
       if (prefixLen > 0) {
         firstIndent = clampIndent(askedIndent);
         // No hanging indent in the notation means the continuations line up under
         // the first line's text, not back at the margin: that is what 青空文庫
         // writes ［＃ここからN字下げ］ for a block quote to mean.
         hangIndent = askedHanging > 0 ? clampIndent(askedHanging) : firstIndent;
+      } else if (pos == 0 && carriedIndent > 0) {
+        // Stage 2i: this page begins in the middle of an indented line, so the
+        // notation that says so is back on the previous page. Every visual line
+        // of the fragment is a continuation, so both numbers are the hanging
+        // one -- there is no first line of a paragraph here to indent
+        // differently.
+        firstIndent = carriedIndent;
+        hangIndent = carriedIndent;
       }
     }
 
