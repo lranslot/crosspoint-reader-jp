@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "AozoraIndent.h"
+#include "BoutenNote.h"
 #include "PageBudget.h"
 #include "VerticalWrap.h"
 
@@ -515,6 +516,94 @@ int modePages(const std::string& dir, const bool useCarry) {
   return 0;
 }
 
+// --- what the bt= counters are counting ------------------------------------
+//
+// The reader's four emphasis-mark counters are incremented in two different
+// places with two different multiplicities, and neither is "once per note in
+// the file":
+//
+//   variant / noparent  in stripRubyNotation(), which runs for *every source
+//                       line of every loadPageAtOffset() call* -- the index
+//                       build included. A page that starts in the middle of a
+//                       long line scans that line from the page start to its
+//                       end, so a note sitting late in a long line is scanned
+//                       once per page that begins before it.
+//   drawn / collide     in collectBoutenForLine(), which runs only on the
+//                       render pass, once per (visual line x span).
+//
+// This mode prints every note in the converted file with the position it sits
+// at inside its own source line, and how many page starts fall at or before
+// it -- which is exactly the number of times one index build counts it.
+int modeBouten(const std::string& dir, const char* only) {
+  for (const std::string& path : corpusFiles(dir)) {
+    const std::string name = std::filesystem::path(path).filename().string();
+    if (only != nullptr && name.find(only) == std::string::npos) continue;
+    const std::string src = readWholeFile(path);
+    const ConvertResult conv = looksUtf8(src) ? convertUtf8(src) : convertSjis(src);
+    const std::string& text = conv.out;
+
+    for (const Setting& s : SETTINGS) {
+      // Page starts, as the reader walks them.
+      std::vector<size_t> starts;
+      FillStats stats;
+      size_t at = 0;
+      while (at < text.size()) {
+        starts.push_back(at);
+        int columns = 0;
+        const size_t next = fillPage(text, at, s, /*useCarry=*/true, stats, columns);
+        if (next <= at) break;
+        at = next;
+      }
+
+      size_t notes = 0;
+      size_t variants = 0;
+      size_t variantScans = 0;
+      size_t noteScans = 0;
+      // Walk source lines, and the notes inside each.
+      size_t lineStart = 0;
+      while (lineStart <= text.size()) {
+        size_t lineEnd = text.find('\n', lineStart);
+        if (lineEnd == std::string::npos) lineEnd = text.size();
+        const size_t lineLen = lineEnd - lineStart;
+        for (size_t i = 0; i + aozora::NOTE_OPEN_LEN <= lineLen;) {
+          if (memcmp(text.data() + lineStart + i, aozora::NOTE_OPEN, aozora::NOTE_OPEN_LEN) != 0) {
+            i++;
+            continue;
+          }
+          const size_t bodyAt = i + aozora::NOTE_OPEN_LEN;
+          const size_t close = text.find(aozora::NOTE_CLOSE, lineStart + bodyAt);
+          if (close == std::string::npos || close > lineEnd) break;
+          bouten::Note note;
+          if (bouten::parseNote(text.data() + lineStart + bodyAt, close - (lineStart + bodyAt), note)) {
+            // How many page starts land inside this line at or before the note.
+            size_t scans = 0;
+            for (const size_t st : starts) {
+              if (st >= lineStart && st <= lineStart + i) scans++;
+            }
+            if (scans == 0) scans = 1;  // the line began before the first page start
+            notes++;
+            noteScans += scans;
+            const std::string quoted(text.data() + lineStart + bodyAt + note.quotedAt, note.quotedLen);
+            if (note.approximated) {
+              variants++;
+              variantScans += scans;
+            }
+            std::printf("  %-20s %-7s %-8s line@%-8zu at+%-6zu linelen=%-6zu scans=%-3zu %s\n", name.c_str(), s.name,
+                        note.approximated ? "variant" : "exact", lineStart, i, lineLen, scans, quoted.c_str());
+          }
+          i = (close - lineStart) + aozora::NOTE_CLOSE_LEN;
+        }
+        if (lineEnd == text.size()) break;
+        lineStart = lineEnd + 1;
+      }
+      std::printf(
+          "%-20s %-7s pages=%-5zu notes=%-5zu variants=%-4zu | one index build counts: notes=%zu variants=%zu\n",
+          name.c_str(), s.name, starts.size(), notes, variants, noteScans, variantScans);
+    }
+  }
+  return 0;
+}
+
 int main(const int argc, char** argv) {
   if (argc < 3) {
     std::fputs("usage: layout_harness alloc|pages <corpus-dir> [--no-carry]\n", stderr);
@@ -529,6 +618,7 @@ int main(const int argc, char** argv) {
   }
   if (mode == "alloc") return modeAlloc(dir);
   if (mode == "pages") return modePages(dir, useCarry);
+  if (mode == "bouten") return modeBouten(dir, argc > 3 && argv[3][0] != '-' ? argv[3] : nullptr);
   std::fprintf(stderr, "harness: unknown mode %s\n", mode.c_str());
   return 1;
 }

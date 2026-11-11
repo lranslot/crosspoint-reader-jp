@@ -133,9 +133,38 @@ class TxtReaderActivity final : public Activity {
   // costs nothing (f8-ruby.md 6.1 (c)).
   int boutenDot = 0;
   int boutenPitch = 0;
-  // Counted per open and written to the diagnostic line, because serial output
-  // does not reach this device's user. A variant we approximate and a dot we
-  // refused to draw are both things we only learn about from a real book.
+  // Written to the diagnostic line as bt=drawn/variant/collide/noparent, because
+  // serial output does not reach this device's user. A variant we approximate and
+  // a dot we refused to draw are both things we only learn about from a real book.
+  //
+  // ★ WHAT ONE COUNT IS. None of these four is "once per annotation in the
+  // file". They are **counts of work done in this session**, accumulated from the
+  // open until the line is rewritten in onExit(), and they are reset by nothing.
+  // Measured against /book/f8-aozora-test-utf8.txt, which holds 136 annotations,
+  // 4 of an unknown kind and 1 whose quoted run does not match: the device
+  // reported bt=40/8/1/7.
+  //
+  //   drawn     one (visual line x span) pair actually drawn, in
+  //             collectBoutenForLine() -- so a run broken across two visual lines
+  //             counts twice, and a page drawn twice counts twice again. Only the
+  //             render pass reaches it. Not comparable to any count of the file.
+  //   variant   one annotation whose kind is neither 丸 nor ゴマ, in
+  //             stripRubyNotation() -- which runs for every source line of every
+  //             loadPageAtOffset() call, the index build included. A page that
+  //             starts inside a long line rescans that line from the page start
+  //             to its end, so an annotation late in a long line is counted once
+  //             per page beginning before it (up to 5 times in the test file's
+  //             23,838-byte line).
+  //   collide   one (visual line x span) pair suppressed because ruby holds the
+  //             band. Same place and same multiplicity as drawn.
+  //   noparent  one annotation whose quoted run was not the bytes in front of it.
+  //             Same place and same multiplicity as variant.
+  //
+  // So the file's own numbers are read from /aozora-strip.txt (the converter sees
+  // each annotation exactly once), and these say how much the reader did with
+  // them. The 8 above is 4 variants x 2 loads of the page holding them; the 7 is
+  // 1 annotation x 7 loads of the page holding it. See
+  // docs-jp/crash-postmortems.md section 7.
   uint16_t boutenDrawn = 0;
   uint16_t boutenVariant = 0;   // a kind beyond the two shapes we cut
   uint16_t boutenCollide = 0;   // ruby on the same characters, so no dots

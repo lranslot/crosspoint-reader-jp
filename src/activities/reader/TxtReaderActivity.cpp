@@ -16,6 +16,7 @@
 #include <cstring>
 
 #include "AozoraIndent.h"
+#include "BoutenNote.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
@@ -862,74 +863,6 @@ size_t TxtReaderActivity::rubyParentStart(const std::string& stripped, const siz
   return start;
 }
 
-// Does `kind` name one of the two shapes the table actually cuts? 丸 and ゴマ
-// are drawn as themselves; 三角, 二重丸, 蛇の目 and ばつ come out as the disc or
-// the ring on their own side of the black/white split, and are counted so a book
-// using one is heard from rather than silently approximated.
-namespace {
-constexpr char BOUTEN_MARU[] = "\xE4\xB8\xB8";              // 丸
-constexpr char BOUTEN_GOMA[] = "\xE3\x82\xB4\xE3\x83\x9E";  // ゴマ
-
-bool boutenKindIsExact(const char* kind, const size_t len) {
-  size_t at = 0;
-  if (len >= 3 && memcmp(kind, "\xE7\x99\xBD", 3) == 0)
-    at = 3;  // 白
-  else if (len >= 3 && memcmp(kind, "\xE9\xBB\x92", 3) == 0)
-    at = 3;  // 黒
-  const size_t rest = len - at;
-  return (rest == 3 && memcmp(kind + at, BOUTEN_MARU, 3) == 0) || (rest == 6 && memcmp(kind + at, BOUTEN_GOMA, 6) == 0);
-}
-
-// ［＃「X」に<kind>傍点］. Returns false for every other annotation, which is what
-// leaves the indent marker — also an annotation — in the line to be read as a
-// prefix further down.
-struct BoutenNote {
-  size_t quotedAt = 0;
-  size_t quotedLen = 0;
-  bool hollow = false;
-  bool approximated = false;
-};
-
-bool parseBoutenNote(const char* body, const size_t len, BoutenNote& out) {
-  static constexpr char KAGI_OPEN[] = "\xE3\x80\x8C";           // 「
-  static constexpr char KAGI_CLOSE[] = "\xE3\x80\x8D";          // 」
-  static constexpr char NI[] = "\xE3\x81\xAB";                  // に
-  static constexpr char BOUTEN[] = "\xE5\x82\x8D\xE7\x82\xB9";  // 傍点
-  static constexpr char SHIRO[] = "\xE7\x99\xBD";               // 白
-  static constexpr size_t CH = 3;
-  static constexpr size_t BOUTEN_LEN = 6;
-
-  if (len < CH * 3 + BOUTEN_LEN) return false;
-  if (memcmp(body, KAGI_OPEN, CH) != 0) return false;
-  // The first 」 ends the quoted run, which is the rule the notation's own
-  // grammar uses; a quoted run containing one is a malformed file.
-  size_t closeAt = CH;
-  while (closeAt + CH <= len && memcmp(body + closeAt, KAGI_CLOSE, CH) != 0) closeAt++;
-  if (closeAt + CH > len) return false;
-  const size_t quotedLen = closeAt - CH;
-  size_t at = closeAt + CH;
-  if (at + CH > len || memcmp(body + at, NI, CH) != 0) return false;
-  at += CH;
-  const size_t kindAt = at;
-  if (len < BOUTEN_LEN || len - BOUTEN_LEN < kindAt) return false;
-  if (memcmp(body + len - BOUTEN_LEN, BOUTEN, BOUTEN_LEN) != 0) {
-    return false;  // ［＃「…」に傍線］ and the rest: not ours, and not removed
-  }
-  const size_t kindLen = len - BOUTEN_LEN - kindAt;
-  out.quotedAt = CH;
-  out.quotedLen = quotedLen;
-  out.hollow = false;
-  for (size_t k = 0; k + CH <= kindLen; k++) {
-    if (memcmp(body + kindAt + k, SHIRO, CH) == 0) {
-      out.hollow = true;
-      break;
-    }
-  }
-  out.approximated = kindLen > 0 && !boutenKindIsExact(body + kindAt, kindLen);
-  return true;
-}
-}  // namespace
-
 void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpan>& spans, std::string& rubyText,
                                           std::vector<BoutenSpan>& bouten) {
   // 《 U+300A, 》 U+300B, ｜ U+FF5C — written as bytes so the encoding of this
@@ -983,9 +916,9 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
       }
     } else if (remain >= NOTE_OPEN_LEN && memcmp(line.data() + i, NOTE_OPEN, NOTE_OPEN_LEN) == 0) {
       const size_t close = line.find(NOTE_CLOSE, i + NOTE_OPEN_LEN);
-      BoutenNote note;
+      bouten::Note note;
       if (close != std::string::npos &&
-          parseBoutenNote(line.data() + i + NOTE_OPEN_LEN, close - (i + NOTE_OPEN_LEN), note)) {
+          bouten::parseNote(line.data() + i + NOTE_OPEN_LEN, close - (i + NOTE_OPEN_LEN), note)) {
         const size_t noteLen = close + MARK_LEN - i;
         // Recorded in the offset map as well, with no text and no parent, so the
         // bytes it occupies are counted there and the page index keeps naming
@@ -1010,6 +943,9 @@ void TxtReaderActivity::stripRubyNotation(std::string& line, std::vector<RubySpa
           span.parentAt = static_cast<uint16_t>(out.size() - note.quotedLen);
           span.parentLen = static_cast<uint8_t>(note.quotedLen);
         } else {
+          // Per *scan*, not per annotation: this function runs for every source
+          // line of every page load, the index build included. See the counter
+          // declarations in the header for what one count means.
           boutenNoParent++;
         }
         if (note.approximated) boutenVariant++;
@@ -1165,6 +1101,8 @@ void TxtReaderActivity::collectBoutenForLine(const size_t start, const size_t en
       }
     }
     if (underRuby) {
+      // Per (visual line x span) and per render, not per annotation -- same rule
+      // as boutenDrawn below. See the counter declarations in the header.
       boutenCollide++;
       continue;
     }
