@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <esp_app_desc.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
@@ -253,6 +254,28 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
   mbedtls_sha256_free(&shaCtx);
   file.close();
   return Result::OK;
+}
+
+firmware_identity::Verdict sameAsRunning(const char* sdPath) {
+  if (sdPath == nullptr) return firmware_identity::Verdict::Unknown;
+  const esp_app_desc_t* running = esp_app_get_description();
+  if (running == nullptr) return firmware_identity::Verdict::Unknown;
+
+  HalFile file;
+  if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
+    return firmware_identity::Verdict::Unknown;
+  }
+  uint8_t head[firmware_identity::HEAD_BYTES] = {};
+  const int read = file.read(head, sizeof(head));
+  if (read < static_cast<int>(sizeof(head))) return firmware_identity::Verdict::Unknown;
+  return firmware_identity::compare(head, sizeof(head), running->app_elf_sha256);
+}
+
+const char* runningVersionString() {
+  // The project's own string, not the descriptor's: CROSSPOINT_VERSION is what
+  // the rest of the UI shows, and the descriptor's version field was measured
+  // stale (FirmwareIdentity.h).
+  return CROSSPOINT_VERSION;
 }
 
 Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, bool alreadyValidated) {

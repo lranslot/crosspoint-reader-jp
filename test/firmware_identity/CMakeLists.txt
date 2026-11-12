@@ -1,0 +1,4 @@
+﻿add_executable(FirmwareIdentityTest FirmwareIdentityTest.cpp)
+target_include_directories(FirmwareIdentityTest PRIVATE ${REPO_ROOT}/src/network)
+target_link_libraries(FirmwareIdentityTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(FirmwareIdentityTest)

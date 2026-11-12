@@ -125,6 +125,15 @@ void SdFirmwareUpdateActivity::promptConfirmation() {
   const auto pos = body.find_last_of('/');
   if (pos != std::string::npos) body = body.substr(pos + 1);
 
+  // Same image as the one running? Say so, and show which version that is so a
+  // person can check by eye. Only when the answer is certain: Unknown keeps the
+  // ordinary prompt, because the one thing this must not do is stand between
+  // the device and an update.
+  if (firmware_flash::sameAsRunning(firmwarePath.c_str()) == firmware_identity::Verdict::Same) {
+    heading = tr(STR_FIRMWARE_SAME_PROMPT);
+    body = firmware_flash::runningVersionString();
+  }
+
   startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body),
                          [this](const ActivityResult& result) { onConfirmationResult(result); });
 }

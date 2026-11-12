@@ -432,6 +432,7 @@ STR_FIRMWARE_TOO_LARGE: "ファームウェアがパーティションに収ま�
 STR_FIRMWARE_TOO_SMALL: "ファームウェアファイルが小さすぎます"
 STR_FIRMWARE_WRONG_DEVICE: "別の機種向けのファームウェアです"
 STR_FIRMWARE_UPDATE_PROMPT: "ファームウェアを更新しますか？"
+STR_FIRMWARE_SAME_PROMPT: "同じファームウェアです。書き込みますか?"
 STR_FIRMWARE_FILE_OPEN_FAILED: "ファイルを開けません"
 STR_FIRMWARE_WRITE_FAILED: "ファームウェアの書き込みに失敗しました"
 STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF: "電源を切らないでください！"

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "FirmwareIdentity.h"
+
 // Flash a firmware image from an SD-card path into the next OTA app
 // partition, then switch otadata so the X3/X4 stock bootloader picks it up
 // on next boot. Mirrors the web flasher: raw esp_partition_erase_range +
@@ -60,6 +62,19 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
 Result validateImageFile(const char* sdPath, size_t partitionSize);
 
 const char* resultName(Result r);
+
+// Is `sdPath` the firmware already running? Reads the first 192 bytes of the
+// file and compares esp_app_desc_t.app_elf_sha256 against the running app's.
+//
+// Returns Unknown on every failure -- SD read, short file, missing descriptor --
+// and the caller must flash on Unknown. See FirmwareIdentity.h for why the hash
+// and not the version string, and for the two real builds that proved the
+// version string identical while the image was not.
+firmware_identity::Verdict sameAsRunning(const char* sdPath);
+
+// The running app's own version string, for showing a person which image they
+// are on. Never null; "unknown" when the descriptor cannot be read.
+const char* runningVersionString();
 
 // Returns the chip_id (esp_image_header_t offset 12) of the currently-running
 // image, or 0xFFFF if it cannot be read. Because the running slot booted
