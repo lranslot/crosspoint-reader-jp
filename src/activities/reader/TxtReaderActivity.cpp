@@ -584,7 +584,7 @@ void TxtReaderActivity::initializeReader() {
   } else {
     columnWidth = charsPerUnit = 0;
     pageExtent = viewportHeight;
-    normalPitch = lineHeight;
+    normalPitch = horizontalLinePitch(lineHeight);
   }
   if (normalPitch < 1) normalPitch = 1;
 
@@ -1748,15 +1748,20 @@ void TxtReaderActivity::render(RenderLock&&) {
 }
 
 void TxtReaderActivity::renderPage() {
-  const int lineHeight = renderer.getLineHeight(cachedFontId);
+  const int rawLineHeight = renderer.getLineHeight(cachedFontId);
 
-  // Vertical takes a separate path and returns. Nothing below this line runs for
-  // it, so the horizontal rendering is the same code it was — which is what
-  // "horizontal must not change by a pixel" means in practice.
+  // Vertical takes a separate path and returns, and takes the *uncompressed*
+  // height: vertically the line spacing setting is applied to the column pitch
+  // (COLUMN_RATIO_PERCENT), and feeding it in here as well would apply it twice
+  // and move the vertical page boundaries, which this change must not do.
   if (isVertical) {
-    renderPageVertical(lineHeight);
+    renderPageVertical(rawLineHeight);
     return;
   }
+  // Horizontally it is the pitch: the same number initializeReader() spent the
+  // page budget in, so the drawing and the budget cannot disagree about where
+  // the last line of a page is.
+  const int lineHeight = horizontalLinePitch(rawLineHeight);
   const int contentWidth = viewportWidth;
 
   // Text starts after the marker gutter (zero-width unless this is a .md file),

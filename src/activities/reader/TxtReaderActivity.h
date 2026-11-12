@@ -282,6 +282,18 @@ class TxtReaderActivity final : public Activity {
   static constexpr int MIN_TEXT_CELLS = 4;
   // Clamp an indent asked for in cells to what this viewport can give.
   [[nodiscard]] int clampIndent(int cells) const;
+  // What one horizontal line costs, line spacing included.
+  //
+  // The horizontal path used to spend the raw advanceY and ignore the setting:
+  // getLineHeight(fontId) rather than the overload that takes the compression.
+  // The setting was in the UI doing nothing, which is worse than not offering
+  // it. Vertical never had the bug -- it multiplies the cell by
+  // COLUMN_RATIO_PERCENT[lineSpacing] -- so the two directions now both honour
+  // it, each in its own axis, and neither applies it twice.
+  [[nodiscard]] static int horizontalLinePitch(int rawLineHeight) {
+    return std::max(1,
+                    static_cast<int>(static_cast<float>(rawLineHeight) * SETTINGS.getReaderLineCompression() + 0.5f));
+  }
   // Where the parent run of an annotation at `end` begins, in `stripped`.
   //
   // Aozora names the parent either explicitly with `｜`, or implicitly as the
