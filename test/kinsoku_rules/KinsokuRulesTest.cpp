@@ -32,8 +32,8 @@ constexpr bool LOOSE = false;
 
 TEST(KinsokuRules, ClosingBracketsMayNotStartALine) {
   // cl-02. Line_Break CL / CP.
-  for (const uint32_t cp : {0x3009u, 0x300Bu, 0x300Du, 0x300Fu, 0x3011u, 0x3015u, 0xFF09u, 0xFF3Du, 0xFF5Du, 0x0029u,
-                            0x005Du, 0x007Du}) {
+  for (const uint32_t cp :
+       {0x3009u, 0x300Bu, 0x300Du, 0x300Fu, 0x3011u, 0x3015u, 0xFF09u, 0xFF3Du, 0xFF5Du, 0x0029u, 0x005Du, 0x007Du}) {
     EXPECT_TRUE(prohibitedAtLineStart(cp, STRICT)) << std::hex << "U+" << cp;
     EXPECT_TRUE(prohibitedAtLineStart(cp, LOOSE)) << std::hex << "U+" << cp << " must hold under the loose rule too";
   }
@@ -74,8 +74,8 @@ TEST(KinsokuRules, FullStopsAndCommasMayNotStartALine) {
 
 TEST(KinsokuRules, OpeningBracketsMayNotEndALine) {
   // cl-01. Line_Break OP, plus the two opening quotes by hand.
-  for (const uint32_t cp : {0x3008u, 0x300Au, 0x300Cu, 0x300Eu, 0x3010u, 0x3014u, 0xFF08u, 0xFF3Bu, 0xFF5Bu, 0x0028u,
-                            0x005Bu, 0x007Bu}) {
+  for (const uint32_t cp :
+       {0x3008u, 0x300Au, 0x300Cu, 0x300Eu, 0x3010u, 0x3014u, 0xFF08u, 0xFF3Bu, 0xFF5Bu, 0x0028u, 0x005Bu, 0x007Bu}) {
     EXPECT_TRUE(prohibitedAtLineEnd(cp)) << std::hex << "U+" << cp;
   }
   EXPECT_TRUE(prohibitedAtLineEnd(0x2018)) << "LEFT SINGLE QUOTATION MARK";
@@ -106,11 +106,14 @@ TEST(KinsokuRules, TheIterationMarkStaysProhibitedEvenUnderTheLooseRule) {
 
 // --- inseparable -----------------------------------------------------------
 
-TEST(KinsokuRules, LeadersAreInseparableFromWhatPrecedesThem) {
-  // Line_Break IN, so the table covers them whatever came before.
-  EXPECT_TRUE(inseparableFromPrevious(0x3042, 0x2026)) << "…";
+TEST(KinsokuRules, ALeaderPairIsInseparableButOneLeaderIsNot) {
+  // JLReq 3.1.10 forbids splitting the *pair*. A line may begin with a single
+  // leader -- that is ordinary Japanese text -- so both sides have to be IN.
   EXPECT_TRUE(inseparableFromPrevious(0x2026, 0x2026)) << "……";
-  EXPECT_TRUE(inseparableFromPrevious(0x3042, 0x2025)) << "‥";
+  EXPECT_TRUE(inseparableFromPrevious(0x2025, 0x2025)) << "‥‥";
+  EXPECT_TRUE(inseparableFromPrevious(0x2026, 0x2025)) << "both are IN";
+  EXPECT_FALSE(inseparableFromPrevious(0x3042, 0x2026)) << "one leader after kana may start a line";
+  EXPECT_FALSE(inseparableFromPrevious(0x3042, 0x2025));
 }
 
 TEST(KinsokuRules, TheTwoEmDashIsHeldTogetherOnlyAgainstItself) {

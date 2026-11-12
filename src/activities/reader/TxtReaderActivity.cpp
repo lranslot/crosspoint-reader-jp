@@ -19,6 +19,7 @@
 #include "AozoraIndent.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "Kinsoku.h"
 #include "MappedInputManager.h"
 #include "PageBudget.h"
 #include "ProgressFile.h"
@@ -46,7 +47,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // from an estimate, which moves rubyPitch and so moves where pages break.
 // 10: an indent is a line attribute and spends cells out of the line's budget.
 // 11: a line carrying emphasis dots reserves a band for them (A7).
-constexpr uint8_t CACHE_VERSION = 12;
+constexpr uint8_t CACHE_VERSION = 13;
 
 // --- A7: the emphasis marks, cut by hand ---
 //
@@ -1587,6 +1588,15 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       size_t breakPos =
           isVertical ? vertwrap::advanceCodepoints(segment, segmentLen, std::max(1, charsPerUnit - indentCells))
                      : renderer.findWrapOffset(cachedFontId, segment, viewportWidth - indentPx, EpdFontFamily::REGULAR);
+
+      // 禁則処理. Push-out only: the break moves earlier until it is legal, which
+      // can only make the line shorter, so what already fit still fits. Skipped
+      // on .md for the same reason ruby and the indent are -- a checklist is not
+      // typeset -- and on a break that is already the end of the source line,
+      // where there is no next line to push into. See Kinsoku.h.
+      if (aozoraMarkup && !isMarkdown && breakPos < segmentLen) {
+        breakPos = kinsoku::adjustBreak(segment, segmentLen, breakPos);
+      }
 
       // The ruby strip is reserved before the line is admitted, because what it
       // costs is what decides whether it fits. Where the ruby was taken out is

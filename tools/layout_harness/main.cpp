@@ -28,6 +28,8 @@
 
 #include "AozoraIndent.h"
 #include "BoutenNote.h"
+#include "Epub/CjkBreaks.h"
+#include "Kinsoku.h"
 #include "PageBudget.h"
 #include "VerticalWrap.h"
 
@@ -120,6 +122,8 @@ constexpr int MIN_TEXT_CELLS = 4;           // TxtReaderActivity::MIN_TEXT_CELLS
 // after of that change can be measured by the same binary. `--no-reserve` is the
 // shape the firmware had up to and including 1.5.0-dev-main-38af4c6e.
 bool g_reserve = true;
+// 禁則処理, switchable so the before and after can be measured by one binary.
+bool g_kinsoku = true;
 
 // --- input ------------------------------------------------------------------
 
@@ -360,9 +364,22 @@ struct FillStats {
   size_t carryLost = 0;
 };
 
+// One visual line, and whether the break that made it was ours.
+//
+// A paragraph that *begins* with 。 is a fact about the file: no adjustment can
+// move the first character of a source line, so such a line start is not a
+// kinsoku violation and counting it as one would make the acceptance test
+// unpassable by anything. Same at the other end for the last line of a
+// paragraph.
+struct VisualLine {
+  std::string text;
+  bool startsSourceLine = false;
+  bool endsSourceLine = false;
+};
+
 // One page, vertically. Returns the offset the next page starts at.
 size_t fillPage(const std::string& content, const size_t offset, const Setting& s, const bool useCarry,
-                FillStats& stats, int& columnsOut) {
+                FillStats& stats, int& columnsOut, std::vector<VisualLine>* outLines = nullptr) {
   PageBudget budget(s.pageExtent, s.normalPitch);
   columnsOut = 0;
   const size_t chunkSize = std::min(PAGE_CHUNK, content.size() - offset);
@@ -408,6 +425,7 @@ size_t fillPage(const std::string& content, const size_t offset, const Setting& 
           pageFull = true;
         } else {
           columnsOut++;
+          if (outLines != nullptr) outLines->push_back({std::string(), true, true});
         }
         break;
       }
@@ -415,6 +433,9 @@ size_t fillPage(const std::string& content, const size_t offset, const Setting& 
       const size_t segmentLen = displayLen - lineBytePos;
       const int indentCells = (lineBytePos == prefixLen) ? firstIndent : hangIndent;
       size_t breakPos = vertwrap::advanceCodepoints(segment, segmentLen, std::max(1, s.charsPerUnit - indentCells));
+      if (g_kinsoku && breakPos < segmentLen) {
+        breakPos = kinsoku::adjustBreak(segment, segmentLen, breakPos);
+      }
       const bool lastOfLine = breakPos >= segmentLen;
       if (lastOfLine) {
         if (!budget.admit(s.normalPitch)) {
@@ -422,6 +443,9 @@ size_t fillPage(const std::string& content, const size_t offset, const Setting& 
           break;
         }
         columnsOut++;
+        if (outLines != nullptr) {
+          outLines->push_back({std::string(segment, segmentLen), lineBytePos == prefixLen, true});
+        }
         lineBytePos = displayLen;
         break;
       }
@@ -431,6 +455,9 @@ size_t fillPage(const std::string& content, const size_t offset, const Setting& 
         break;
       }
       columnsOut++;
+      if (outLines != nullptr) {
+        outLines->push_back({std::string(segment, breakPos), lineBytePos == prefixLen, false});
+      }
       size_t skip = breakPos;
       if (breakPos < segmentLen && segment[breakPos] == ' ') skip++;
       lineBytePos += skip;
@@ -609,6 +636,72 @@ int modeBouten(const std::string& dir, const char* only) {
   return 0;
 }
 
+// --- the pass/fail of 禁則処理 -----------------------------------------------
+//
+// Lays out every page of every file at every setting and looks at the first and
+// last character of every visual line. A line that starts with a prohibited
+// character, or ends with one, or splits an inseparable pair, is a violation and
+// is printed in full -- file, setting, page, line, character. Zero violations is
+// the whole acceptance test; a page count that moved is only interesting
+// afterwards.
+int modeScan(const std::string& dir) {
+  size_t lines = 0;
+  size_t violations = 0;
+  for (const std::string& path : corpusFiles(dir)) {
+    const std::string name = std::filesystem::path(path).filename().string();
+    const std::string src = readWholeFile(path);
+    const ConvertResult conv = looksUtf8(src) ? convertUtf8(src) : convertSjis(src);
+    for (const Setting& s : SETTINGS) {
+      size_t at = 0;
+      size_t page = 0;
+      while (at < conv.out.size()) {
+        page++;
+        int columns = 0;
+        FillStats stats;
+        std::vector<VisualLine> visual;
+        const size_t next = fillPage(conv.out, at, s, /*useCarry=*/true, stats, columns, &visual);
+        for (size_t li = 0; li < visual.size(); li++) {
+          const std::string& v = visual[li].text;
+          if (v.empty()) continue;
+          lines++;
+          const uint32_t first = kinsoku::codepointAt(v.data(), v.size(), 0);
+          const uint32_t last = kinsoku::codepointAt(v.data(), v.size(), kinsoku::stepBack(v.data(), v.size()));
+          // The first line of a page continues a source line, and the last one
+          // may end a paragraph, but a prohibited character is prohibited
+          // wherever it lands -- no line of body text may start or end with one.
+          if (!visual[li].startsSourceLine && CjkBreaks::jp::prohibitedAtLineStart(first, kinsoku::STRICT)) {
+            violations++;
+            std::printf("VIOLATION line-start %-20s %-7s p%-5zu line%-3zu U+%04X\n", name.c_str(), s.name, page, li + 1,
+                        first);
+          }
+          if (!visual[li].endsSourceLine && CjkBreaks::jp::prohibitedAtLineEnd(last)) {
+            // Only when another line follows: a character at the very end of a
+            // paragraph is not "at a line end" in the kinsoku sense.
+            violations++;
+            std::printf("VIOLATION line-end   %-20s %-7s p%-5zu line%-3zu U+%04X\n", name.c_str(), s.name, page, li + 1,
+                        last);
+          }
+          if (li > 0 && !visual[li].startsSourceLine && !visual[li - 1].text.empty()) {
+            const std::string& prev = visual[li - 1].text;
+            const uint32_t prevLast =
+                kinsoku::codepointAt(prev.data(), prev.size(), kinsoku::stepBack(prev.data(), prev.size()));
+            if (CjkBreaks::jp::inseparableFromPrevious(prevLast, first)) {
+              violations++;
+              std::printf("VIOLATION inseparable %-20s %-7s p%-5zu line%-3zu U+%04X after U+%04X\n", name.c_str(),
+                          s.name, page, li + 1, first, prevLast);
+            }
+          }
+        }
+        if (next <= at) break;
+        at = next;
+      }
+    }
+  }
+  std::printf("scanned %zu visual lines, kinsoku=%s -> %zu violation(s)\n", lines, g_kinsoku ? "on" : "off",
+              violations);
+  return violations == 0 ? 0 : 1;
+}
+
 int main(const int argc, char** argv) {
   if (argc < 3) {
     std::fputs("usage: layout_harness alloc|pages <corpus-dir> [--no-carry]\n", stderr);
@@ -620,9 +713,11 @@ int main(const int argc, char** argv) {
   for (int i = 3; i < argc; i++) {
     if (std::strcmp(argv[i], "--no-carry") == 0) useCarry = false;
     if (std::strcmp(argv[i], "--no-reserve") == 0) g_reserve = false;
+    if (std::strcmp(argv[i], "--no-kinsoku") == 0) g_kinsoku = false;
   }
   if (mode == "alloc") return modeAlloc(dir);
   if (mode == "pages") return modePages(dir, useCarry);
+  if (mode == "scan") return modeScan(dir);
   if (mode == "bouten") return modeBouten(dir, argc > 3 && argv[3][0] != '-' ? argv[3] : nullptr);
   std::fprintf(stderr, "harness: unknown mode %s\n", mode.c_str());
   return 1;

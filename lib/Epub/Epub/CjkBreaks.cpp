@@ -121,6 +121,46 @@ std::vector<size_t> characterBreakByteOffsets(const std::string& text) {
 }
 
 namespace jp {
+
+// ── ★ Where this does NOT follow LineBreak.txt ───────────────────────────────
+//
+// One table, so regenerating LineBreakTables.h cannot quietly drop any of it.
+// The generator prints nothing about these; scripts/gen_line_break.py says so
+// next to its regeneration command.
+//
+// | character        | Line_Break | what we do              | why                |
+// |------------------|------------|-------------------------|--------------------|
+// | ' U+2018         | QU         | added to line-end       | Unicode will not   |
+// | " U+201C         | QU         | prohibition (cl-01)     | say which of open  |
+// | ' U+2019         | QU         | added to line-start     | or close these are |
+// | " U+201D         | QU         | prohibition (cl-02)     | -- it depends on   |
+// |                  |            |                         | the language.      |
+// |                  |            |                         | JLReq is Japanese  |
+// |                  |            |                         | and can.           |
+// | - U+2010 HYPHEN  | HH         | added to line-start     | HH is a break      |
+// |                  |            | prohibition (cl-03)     | *opportunity* in   |
+// |                  |            |                         | Unicode's terms;   |
+// |                  |            |                         | JLReq cl-03 is a   |
+// |                  |            |                         | prohibition        |
+// | - U+2015 / U+2014| AI / B2    | explicit pair rule in   | neither is IN, so  |
+// |                  |            | inseparableFromPrevious | no class holds the |
+// |                  |            |                         | 2-em dash together |
+//
+// And one difference we looked at and did **not** overturn:
+//
+// | 々 U+3005 | NS | left as Unicode has it | Unicode: always prohibited at a
+//                                            line start. JLReq: one of the ones
+//                                            books relax. Under the strict rule
+//                                            -- the only one shipped today --
+//                                            the two agree, so nothing in the
+//                                            current output differs. Revisit
+//                                            when the loose rule becomes a
+//                                            setting; the choice then is between
+//                                            following Unicode and keeping a
+//                                            hand-maintained exception.
+//
+// See docs-jp/f8-kinsoku.md for the same table with the measurements behind it.
+
 namespace {
 
 // The characters the generated tables cannot settle, with the reason each one is
@@ -166,7 +206,13 @@ bool prohibitedAtLineEnd(const uint32_t cp) {
 }
 
 bool inseparableFromPrevious(const uint32_t prevCp, const uint32_t cp) {
-  if (line_break::inTable(line_break::INSEPARABLE, rangeCount(line_break::INSEPARABLE), cp)) {
+  // A *pair*, not a single character. JLReq 3.1.10 forbids splitting the
+  // three-dot leader pair and the two-dot leader pair; it does not forbid a line
+  // from starting with one leader, which is ordinary in Japanese text. Testing
+  // only `cp` made the leader unable to start a line at all, which pushed breaks
+  // back for no reason -- caught by the host test, not by reading.
+  if (line_break::inTable(line_break::INSEPARABLE, rangeCount(line_break::INSEPARABLE), cp) &&
+      line_break::inTable(line_break::INSEPARABLE, rangeCount(line_break::INSEPARABLE), prevCp)) {
     return true;
   }
   // The 2-em dash: a pair of the same dash, held together by no Unicode class.

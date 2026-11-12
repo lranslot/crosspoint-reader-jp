@@ -2,6 +2,7 @@
 
 #include <Txt.h>
 
+#include <algorithm>
 #include <atomic>
 #include <vector>
 

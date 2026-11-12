@@ -61,6 +61,22 @@ boundaries themselves. `--no-carry` turns off the indent carried across a page
 boundary, which is the control for that change: a book with no indent notation
 must produce identical output either way.
 
+```
+layout_harness scan <corpus-dir> [--no-kinsoku]
+```
+
+**The acceptance test for 禁則処理.** Lays out every page of every file at every
+setting and looks at the first and last character of every visual line, then
+prints every violation it finds — file, setting, page, line, character — and a
+count. Zero is the pass; `--no-kinsoku` says how many there would be without
+it (2,534 against 44,292 lines, measured).
+
+Paragraph boundaries are excluded, and that exclusion is the point rather than
+a convenience: the first character of a source line cannot be moved by any
+adjustment, so a paragraph that begins with 。 is a fact about the file. The
+first version of this mode did not make the distinction and reported six
+violations that no implementation could have fixed.
+
 `baseline/pages-summary.txt` holds the summary lines for the revision named in
 its header. To compare:
 

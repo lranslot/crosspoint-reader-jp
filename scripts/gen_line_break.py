@@ -44,6 +44,15 @@ HTML の表で、拾うと取りこぼす。Line_Break は機械可読な一次�
   python scripts/gen_line_break.py LineBreak.txt [output_path]
 
 既定の出力: lib/Epub/Epub/LineBreakTables.h
+
+★★ この表だけでは足りない。CjkBreaks.cpp の追加規則と合わせて使うこと。
+
+  Unicode が「決めていない」ために類から漏れる字が 5 つあり
+  (‘ ’ “ ” は QU、‐ は HH)、2倍ダーシ (U+2015 / U+2014) は
+  どの類にも入らない。**この表を再生成しても、それらは戻ってこない。**
+  一覧は `CjkBreaks.cpp` の `namespace jp` 冒頭と
+  `docs-jp/f8-kinsoku.md` にある。表を作り直したら、その一覧が
+  まだ生きているかを確かめること。
 """
 
 import pathlib
