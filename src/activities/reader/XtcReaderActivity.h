@@ -13,12 +13,14 @@
 #include <utility>
 
 #include "EndOfBookOptions.h"
+#include "ReaderUtils.h"
 #include "activities/Activity.h"
 
 class XtcReaderActivity final : public Activity {
   std::shared_ptr<Xtc> xtc;
 
   uint32_t currentPage = 0;
+  ReaderUtils::HeldPageSkip heldSkip;
   int pagesUntilFullRefresh = 0;
   // Next-book suggestion menu for the End-of-Book screen
   EndOfBookOptions endOfBookOptions;

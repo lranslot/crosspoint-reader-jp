@@ -7,6 +7,7 @@
 
 #include "CrossPointSettings.h"
 #include "PageTurnQueue.h"
+#include "ReaderUtils.h"
 #include "activities/Activity.h"
 
 class TxtReaderActivity final : public Activity {
@@ -412,6 +413,7 @@ class TxtReaderActivity final : public Activity {
   // render() on the render task, so it is atomic; nothing else about a page turn
   // crosses tasks.
   PageTurnQueue turnQueue;
+  ReaderUtils::HeldPageSkip heldSkip;
   std::atomic<bool> renderOutstanding{false};
   // Times fewer pages were turned than were asked for -- the end of the book, or
   // the index frontier going backwards. Reported on the diagnostic line for the

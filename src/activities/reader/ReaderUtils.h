@@ -18,6 +18,63 @@ constexpr unsigned long SKIP_HOLD_MS = 700;
 constexpr unsigned long BOOKMARK_HOLD_MS = 400;
 constexpr unsigned long BOOKMARK_MESSAGE_DURATION_MS = 2500;
 
+// Pages added per hold step once SKIP_HOLD_MS has passed. The cadence is the
+// screen's own: PageTurnQueue only accepts a new step once the previous one has
+// been drawn, so a refresh is one step and no timer is needed beyond the
+// threshold. Equal to PageTurnQueue::MAX_PENDING on purpose -- a step is one
+// full queue, which is also the most a deliberate multi-tap can ask for.
+constexpr int PAGE_SKIP_STEP = 5;
+
+// Does a page turn fire on the press, or on the release?
+//
+// On the release only when the hold is an *either/or*: CHAPTER_SKIP has to wait
+// to find out whether the press meant one page or one chapter, and
+// ORIENTATION_CHANGE the same. That wait is why those two make an ordinary page
+// turn feel slower, and it is a real cost.
+//
+// PAGE_SKIP does not pay it. Holding adds pages to a turn that was wanted
+// anyway, so the press fires at once and the hold accumulates on top.
+[[nodiscard]] inline bool pageTurnFiresOnPress() {
+  return SETTINGS.longPressButtonBehavior == CrossPointSettings::OFF ||
+         SETTINGS.longPressButtonBehavior == CrossPointSettings::PAGE_SKIP;
+}
+
+// A held page-turn button, paced so the three readers behave identically.
+//
+// `step()` returns PAGE_SKIP_STEP once per REPEAT_MS while the button is down
+// and has been down longer than SKIP_HOLD_MS, and 0 otherwise. REPEAT_MS is
+// about one full refresh, so a hold advances roughly as fast as the screen can
+// answer; a shorter interval would only queue work the e-ink cannot show.
+//
+// A struct and not a free function because the pacing is per reader: each one
+// owns its own last-step stamp, and two readers are never on screen at once.
+struct HeldPageSkip {
+  static constexpr unsigned long REPEAT_MS = 600;
+
+  // `forward` is only meaningful when the result is non-zero.
+  [[nodiscard]] int step(const MappedInputManager& input, bool& forward) {
+    if (SETTINGS.longPressButtonBehavior != CrossPointSettings::PAGE_SKIP) {
+      lastStepMs = 0;
+      return 0;
+    }
+    const bool next = input.isPressed(MappedInputManager::Button::PageForward);
+    const bool prev = input.isPressed(MappedInputManager::Button::PageBack);
+    if (next == prev) {  // neither, or both: nothing to infer, and the hold ended
+      lastStepMs = 0;
+      return 0;
+    }
+    if (input.getHeldTime() <= SKIP_HOLD_MS) return 0;
+    const unsigned long now = millis();
+    if (lastStepMs != 0 && now - lastStepMs < REPEAT_MS) return 0;
+    lastStepMs = now;
+    forward = next;
+    return PAGE_SKIP_STEP;
+  }
+
+ private:
+  unsigned long lastStepMs = 0;
+};
+
 enum ReaderTouchAction : freeink::ui::ActionId {
   READER_TOUCH_PREV = 1,
   READER_TOUCH_NEXT = 3,
@@ -49,7 +106,7 @@ struct PageTurnResult {
 };
 
 inline PageTurnResult detectPageTurn(const MappedInputManager& input) {
-  const bool usePress = SETTINGS.longPressButtonBehavior == SETTINGS.OFF;
+  const bool usePress = ReaderUtils::pageTurnFiresOnPress();
   const bool tiltNext = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedForward();
   const bool tiltPrev = SETTINGS.tiltPageTurn && halTiltSensor.wasTiltedBack();
   const bool swapFront = input.isNavDirectionSwapped();

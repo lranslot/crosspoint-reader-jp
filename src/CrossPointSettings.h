@@ -166,6 +166,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     OFF = 0,
     CHAPTER_SKIP = 1,
     ORIENTATION_CHANGE = 2,
+    // Hold to keep turning, five pages at a time. Unlike the two above this one
+    // keeps firing a page turn on the *press*, because it is not an either/or:
+    // chapter skip has to wait for the release to find out whether the press was
+    // short (one page) or long (one chapter), and paying for that wait with a
+    // slower ordinary page turn is the whole cost of CHAPTER_SKIP. Five-page
+    // skip is cumulative instead -- the first page turn is wanted either way --
+    // so the press fires at once and the hold adds to it.
+    PAGE_SKIP = 3,
     LONG_PRESS_BUTTON_BEHAVIOR_COUNT
   };
 

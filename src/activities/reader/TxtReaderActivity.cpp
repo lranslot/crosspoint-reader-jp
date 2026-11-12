@@ -200,7 +200,7 @@ void TxtReaderActivity::loop() {
   // reading wasReleased() here would let the page turn on the way down and this
   // block would never be reached. Touch and tilt are deliberately not consulted —
   // cursor movement is side-button only.
-  const bool usePress = SETTINGS.longPressButtonBehavior == SETTINGS.OFF;
+  const bool usePress = ReaderUtils::pageTurnFiresOnPress();
   const bool sideNext = usePress ? mappedInput.wasPressed(MappedInputManager::Button::PageForward)
                                  : mappedInput.wasReleased(MappedInputManager::Button::PageForward);
   const bool sidePrev = usePress ? mappedInput.wasPressed(MappedInputManager::Button::PageBack)
@@ -294,6 +294,15 @@ void TxtReaderActivity::loop() {
   // delayed by this, and for the book-closing edge it removes.
   if (prevTriggered) turnQueue.push(false);
   if (nextTriggered) turnQueue.push(true);
+  // A held button keeps turning, five pages at a step. Asked only when there is
+  // nothing already owed and nothing being drawn, so the screen's own refresh is
+  // the cadence -- a step is one refresh, and no timer is needed beyond
+  // SKIP_HOLD_MS.
+  if (turnQueue.pending() == 0 && !renderOutstanding.load()) {
+    bool forward = false;
+    const int step = heldSkip.step(mappedInput, forward);
+    for (int i = 0; i < step; i++) turnQueue.push(forward);
+  }
   if (turnQueue.ready(renderOutstanding.load())) {
     applyPageTurns(turnQueue.take());
   }

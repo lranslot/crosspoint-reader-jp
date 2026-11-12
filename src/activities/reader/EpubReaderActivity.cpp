@@ -635,6 +635,19 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // PAGE_SKIP keeps turning while the button is held, five pages a step. Done by
+  // calling the ordinary page turn five times so a step crosses a chapter
+  // boundary exactly the way five separate presses would; the notifications
+  // coalesce, so it still costs one refresh.
+  {
+    bool forward = false;
+    const int step = heldSkip.step(mappedInput, forward);
+    if (step > 0) {
+      for (int i = 0; i < step; i++) pageTurn(forward);
+      return;
+    }
+  }
+
   if (longPress && SETTINGS.longPressButtonBehavior == SETTINGS.CHAPTER_SKIP) {
     if (!nextTriggered && section && section->currentPage > 0) {
       section->currentPage = 0;

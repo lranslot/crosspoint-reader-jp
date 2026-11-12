@@ -9,12 +9,14 @@
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
+#include "ReaderUtils.h"
 #include "activities/Activity.h"
 
 class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;
+  ReaderUtils::HeldPageSkip heldSkip;
   int nextPageNumber = 0;
   std::optional<uint16_t> pendingPageJump;
   // Set when navigating to a footnote href with a fragment (e.g. #note1).

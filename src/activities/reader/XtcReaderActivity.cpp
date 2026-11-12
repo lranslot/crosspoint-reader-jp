@@ -137,6 +137,24 @@ void XtcReaderActivity::loop() {
       !fromTilt && SETTINGS.longPressButtonBehavior == SETTINGS.CHAPTER_SKIP && heldMs > ReaderUtils::SKIP_HOLD_MS;
   const int skipAmount = skipPages ? 10 : 1;
 
+  // PAGE_SKIP keeps turning while the button is held, five pages a step, the
+  // same as the other two readers. Separate from the branch above because that
+  // one fires on the release edge and this one is driven by the button still
+  // being down -- there is no edge to hang it on.
+  {
+    bool forward = false;
+    const int step = heldSkip.step(mappedInput, forward);
+    if (step > 0) {
+      if (forward) {
+        currentPage = std::min<uint32_t>(currentPage + step, xtc->getPageCount());
+      } else {
+        currentPage = currentPage >= static_cast<uint32_t>(step) ? currentPage - step : 0;
+      }
+      requestUpdate();
+      return;
+    }
+  }
+
   if (prevTriggered) {
     if (currentPage >= static_cast<uint32_t>(skipAmount)) {
       currentPage -= skipAmount;
