@@ -1076,6 +1076,13 @@ void BaseTheme::drawTextField(const GfxRenderer& renderer, Rect rect, const int 
   }
 }
 
+namespace {
+// A popup heading gets at most two lines. Two is what the 434 Japanese UI
+// strings need -- the longest of them wraps into two at UI_12 -- and a third
+// would start pushing the option list off a 480 px screen.
+constexpr int POPUP_TITLE_MAX_LINES = 2;
+}  // namespace
+
 void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
                                 int selectedIndex) const {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -1100,12 +1107,40 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
     int w = renderer.getTextWidth(optionFontId, opt.c_str(), optionStyle);
     if (w > maxTextWidth) maxTextWidth = w;
   }
+  // The box is capped at the screen width below, so a title wider than that cap
+  // used to be drawn at its full width and run out of the frame -- seen with
+  // "同じファームウェアです。書き込みますか?". The widest the title may be is
+  // therefore the capped box minus its padding, and anything over that wraps.
+  const int titleRoom = pageWidth - metrics.optionPopupDialogSideMargin * 2 - innerPadding * 2 - selectionHPadding * 2;
+  const std::vector<std::string> titleLines =
+      renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD) <= titleRoom
+          ? std::vector<std::string>{title}
+          : renderer.wrappedText(UI_12_FONT_ID, title, titleRoom, POPUP_TITLE_MAX_LINES);
+  // ★ Two lines and still over: the last line is truncated with an ellipsis
+  // rather than drawn off the edge. Losing the tail of a heading is bad; losing
+  // it with nothing on screen to say so is worse, which is the same call
+  // drawHintLabel() makes. Not reached by any shipped string -- the longest
+  // Japanese heading wraps into two.
+  std::vector<std::string> fittedTitle;
+  fittedTitle.reserve(titleLines.size());
+  for (const auto& l : titleLines) {
+    fittedTitle.push_back(renderer.getTextWidth(UI_12_FONT_ID, l.c_str(), EpdFontFamily::BOLD) <= titleRoom
+                              ? l
+                              : renderer.truncatedText(UI_12_FONT_ID, l.c_str(), titleRoom, EpdFontFamily::BOLD));
+  }
+  for (const auto& l : fittedTitle) {
+    const int w = renderer.getTextWidth(UI_12_FONT_ID, l.c_str(), EpdFontFamily::BOLD);
+    if (w > maxTextWidth) maxTextWidth = w;
+  }
 
   const int optionCount = static_cast<int>(options.size());
   const int listHeight = rowHeight * optionCount + itemSpacing * (optionCount - 1);
   const int dialogW = std::min((maxTextWidth + innerPadding * 2 + selectionHPadding * 2) * 12 / 10,
                                pageWidth - metrics.optionPopupDialogSideMargin * 2);
-  const int contentHeight = titleLineHeight + metrics.optionPopupTitleGap + listHeight;
+  // One title line unless it wrapped: a heading that fits is laid out exactly as
+  // it was, so no existing popup changes by a pixel.
+  const int titleBlockHeight = titleLineHeight * static_cast<int>(fittedTitle.size());
+  const int contentHeight = titleBlockHeight + metrics.optionPopupTitleGap + listHeight;
   const int dialogH = contentHeight + innerPadding * 2;
   const int dialogX = (pageWidth - dialogW) / 2;
   const int dialogY = (pageHeight - dialogH) / 2;
@@ -1128,8 +1163,10 @@ void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, 
 
   int y = dialogY + innerPadding;
 
-  renderer.drawCenteredText(UI_12_FONT_ID, y, title, true, EpdFontFamily::BOLD);
-  y += titleLineHeight;
+  for (const auto& l : fittedTitle) {
+    renderer.drawCenteredText(UI_12_FONT_ID, y, l.c_str(), true, EpdFontFamily::BOLD);
+    y += titleLineHeight;
+  }
 
   if (metrics.optionPopupTitleSeparator) {
     const int sepY = y + metrics.optionPopupTitleGap / 2;
