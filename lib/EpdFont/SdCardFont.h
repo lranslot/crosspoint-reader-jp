@@ -119,6 +119,14 @@ class SdCardFont {
   // Static and never reset: the question is about the card, not about one font
   // object, and the reader prints the running totals in its open diagnostic, so
   // the difference between two lines says what happened between two opens.
+  // How much work a page of text asked of the font, counted so "horizontal is
+  // slow" can be a number instead of an impression. advanceLookups is every
+  // width question (the wrap loop asks one per candidate break); glyphLoads is
+  // every glyph actually read off the card. Static and never reset: the
+  // difference between two readings is what a page cost.
+  static uint32_t advanceLookups() { return advanceLookups_; }
+  static uint32_t glyphLoads() { return glyphLoads_; }
+  static void countAdvanceLookup() { advanceLookups_++; }
   static uint32_t glyphRetries() { return glyphRetries_; }
   static uint32_t glyphFailures() { return glyphFailures_; }
 
@@ -273,6 +281,8 @@ class SdCardFont {
   // caller owns `bitmapOut` and frees it on a later failure.
   static bool readGlyphFromCard(SdCardFont* self, const PerStyle& s, int32_t globalIdx, uint32_t codepoint,
                                 uint8_t styleIdx, EpdGlyph& glyphOut, uint8_t*& bitmapOut);
+  static uint32_t advanceLookups_;
+  static uint32_t glyphLoads_;
   static uint32_t glyphRetries_;
   static uint32_t glyphFailures_;
 

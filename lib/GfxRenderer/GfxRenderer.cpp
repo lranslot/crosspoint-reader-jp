@@ -1996,6 +1996,10 @@ size_t GfxRenderer::findWrapOffset(const int fontId, const char* text, const int
                                    const int extraWidth) const {
   if (text == nullptr || *text == '\0' || maxWidth <= 0) return 0;
 
+  // Counted so a page of text can be reported as the work it asked for, rather
+  // than as an impression that one writing direction is slow.
+  SdCardFont::countAdvanceLookup();
+
   const char* const begin = text;
   const size_t totalLen = strlen(text);
 

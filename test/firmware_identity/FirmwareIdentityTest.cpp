@@ -7,12 +7,12 @@
 //
 // The unit under test is the shipped header, included from src/, not a copy.
 
-#include "FirmwareIdentity.h"
-
 #include <gtest/gtest.h>
 
 #include <cstring>
 #include <vector>
+
+#include "FirmwareIdentity.h"
 
 namespace {
 
@@ -140,14 +140,53 @@ TEST(FirmwareIdentity, OnlyAnExactMatchEverSaysSame) {
   EXPECT_EQ(sameCount, 1);
 }
 
-TEST(FirmwareIdentity, TheOffsetsAreTheOnesMeasuredOnARealImage) {
-  // Pinned, because they were established by parsing a real firmware.bin and a
-  // later change to them would silently turn every verdict into Unknown.
-  EXPECT_EQ(firmware_identity::DESC_OFFSET, 32u) << "image header 24 + segment header 8";
+TEST(FirmwareIdentity, TheHashIsReadFromTheFieldAndNotFromItsNeighbours) {
+  // ★ The test that was missing, and the reason the check shipped broken.
+  //
+  // The old one asserted SHA_OFFSET_IN_DESC == 128 -- a constant against
+  // itself, which cannot catch a wrong constant. This one fills every other
+  // field of esp_app_desc_t with a distinct byte and puts the hash only in the
+  // field, so reading one byte to either side fails. At 128 (the shipped bug)
+  // the window is the tail of idf_ver plus half the hash, and this does not
+  // pass.
+  std::vector<uint8_t> head(HEAD_BYTES, 0x00);
+  const uint32_t magic = firmware_identity::DESC_MAGIC;
+  memcpy(head.data() + firmware_identity::DESC_OFFSET, &magic, sizeof(magic));
+  const auto fill = [&](const size_t at, const size_t len, const uint8_t b) {
+    for (size_t i = 0; i < len; i++) head[firmware_identity::DESC_OFFSET + at + i] = b;
+  };
+  fill(4, 4, 0x11);     // secure_version
+  fill(8, 8, 0x22);     // reserv1[2]
+  fill(16, 32, 0x33);   // version
+  fill(48, 32, 0x44);   // project_name
+  fill(80, 16, 0x55);   // time
+  fill(96, 16, 0x66);   // date
+  fill(112, 32, 0x77);  // idf_ver -- the field the bug read into
+  const auto sha = hashOf(0x90);
+  memcpy(head.data() + firmware_identity::DESC_OFFSET + firmware_identity::SHA_OFFSET_IN_DESC, sha.data(), sha.size());
+
+  EXPECT_EQ(compare(head.data(), head.size(), sha.data()), Verdict::Same);
+
+  // And every neighbouring window must not match, which is what "read the field"
+  // means. 0x77 is idf_ver; a window starting 16 bytes early is half of it.
+  std::vector<uint8_t> shifted(firmware_identity::SHA_BYTES);
+  memcpy(shifted.data(), head.data() + firmware_identity::DESC_OFFSET + firmware_identity::SHA_OFFSET_IN_DESC - 16, 16);
+  memcpy(shifted.data() + 16, sha.data(), 16);
+  EXPECT_EQ(compare(head.data(), head.size(), shifted.data()), Verdict::Different)
+      << "the old 128 offset read exactly this window";
+}
+
+TEST(FirmwareIdentity, TheOffsetsMatchTheEspAppDescLayout) {
+  // Spelled out as the sum that produces them, not as the numbers, so a wrong
+  // one has to be wrong about a field size to get here.
+  constexpr size_t kMagic = 4, kSecure = 4, kReserv1 = 8, kVersion = 32, kProject = 32, kTime = 16, kDate = 16,
+                   kIdfVer = 32;
+  EXPECT_EQ(firmware_identity::SHA_OFFSET_IN_DESC,
+            kMagic + kSecure + kReserv1 + kVersion + kProject + kTime + kDate + kIdfVer);
+  EXPECT_EQ(firmware_identity::DESC_OFFSET, 24u + 8u) << "esp_image_header_t + esp_image_segment_header_t";
   EXPECT_EQ(firmware_identity::DESC_MAGIC, 0xABCD5432u);
-  EXPECT_EQ(firmware_identity::SHA_OFFSET_IN_DESC, 128u);
   EXPECT_EQ(firmware_identity::SHA_BYTES, 32u);
-  EXPECT_EQ(HEAD_BYTES, 192u) << "one short read identifies a 5.6 MB image";
+  EXPECT_EQ(HEAD_BYTES, 208u) << "one short read identifies a 5.6 MB image";
 }
 
 }  // namespace

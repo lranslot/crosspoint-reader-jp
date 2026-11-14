@@ -257,18 +257,61 @@ Result validateImageFile(const char* sdPath, size_t partitionSize) {
 }
 
 firmware_identity::Verdict sameAsRunning(const char* sdPath) {
-  if (sdPath == nullptr) return firmware_identity::Verdict::Unknown;
+  // Every answer is written to /fwid.txt, because the first version of this
+  // check shipped answering "different" for an identical image and there was no
+  // way to tell from the device whether it had compared at all. Serial output
+  // does not reach this device's user, so a verdict that is only logged is a
+  // verdict nobody can see.
+  const auto say = [&](const firmware_identity::Verdict v, const char* why, const uint8_t* candidate,
+                       const uint8_t* running) {
+    char line[200];
+    const char* name = v == firmware_identity::Verdict::Same        ? "same"
+                       : v == firmware_identity::Verdict::Different ? "different"
+                                                                    : "unknown";
+    int n = snprintf(line, sizeof(line), "%lu %s (%s)", static_cast<unsigned long>(millis()), name, why);
+    // The first eight bytes of each hash: enough to tell two builds apart by eye
+    // and to see at a glance whether the window was read from the right place (a
+    // run of zeros here is how the +128 bug looked).
+    if (candidate != nullptr && running != nullptr && n > 0 && n < static_cast<int>(sizeof(line))) {
+      n += snprintf(line + n, sizeof(line) - n, " card=");
+      for (size_t i = 0; i < 8 && n > 0 && n < static_cast<int>(sizeof(line)); i++) {
+        n += snprintf(line + n, sizeof(line) - n, "%02x", candidate[i]);
+      }
+      n += snprintf(line + n, sizeof(line) - n, " run=");
+      for (size_t i = 0; i < 8 && n > 0 && n < static_cast<int>(sizeof(line)); i++) {
+        n += snprintf(line + n, sizeof(line) - n, "%02x", running[i]);
+      }
+    }
+    if (n > 0 && n < static_cast<int>(sizeof(line))) {
+      n += snprintf(line + n, sizeof(line) - n, " path=[%.60s]\n", sdPath != nullptr ? sdPath : "-");
+    }
+    if (n > 0) {
+      HalFile log = Storage.open("/fwid.txt", O_WRITE | O_CREAT | O_AT_END);
+      if (log) {
+        log.write(line, static_cast<size_t>(n));
+        log.flush();
+        log.close();
+      }
+    }
+    return v;
+  };
+
+  if (sdPath == nullptr) return say(firmware_identity::Verdict::Unknown, "no path", nullptr, nullptr);
   const esp_app_desc_t* running = esp_app_get_description();
-  if (running == nullptr) return firmware_identity::Verdict::Unknown;
+  if (running == nullptr) return say(firmware_identity::Verdict::Unknown, "no running descriptor", nullptr, nullptr);
 
   HalFile file;
   if (!Storage.openFileForRead("FLASH", sdPath, file) || !file) {
-    return firmware_identity::Verdict::Unknown;
+    return say(firmware_identity::Verdict::Unknown, "open failed", nullptr, running->app_elf_sha256);
   }
   uint8_t head[firmware_identity::HEAD_BYTES] = {};
   const int read = file.read(head, sizeof(head));
-  if (read < static_cast<int>(sizeof(head))) return firmware_identity::Verdict::Unknown;
-  return firmware_identity::compare(head, sizeof(head), running->app_elf_sha256);
+  if (read < static_cast<int>(sizeof(head))) {
+    return say(firmware_identity::Verdict::Unknown, "short read", nullptr, running->app_elf_sha256);
+  }
+  const firmware_identity::Verdict v = firmware_identity::compare(head, sizeof(head), running->app_elf_sha256);
+  return say(v, "compared", head + firmware_identity::DESC_OFFSET + firmware_identity::SHA_OFFSET_IN_DESC,
+             running->app_elf_sha256);
 }
 
 const char* runningVersionString() {

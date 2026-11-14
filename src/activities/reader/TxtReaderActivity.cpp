@@ -286,9 +286,21 @@ void TxtReaderActivity::loop() {
     requestUpdate();
   }
 
-  if (!prevTriggered && !nextTriggered) {
-    return;
-  }
+  // ★ No early return on "no edge this pass".
+  //
+  // There used to be one here, and it broke both of the things below, because
+  // both of them are about passes where nothing was pressed:
+  //
+  //   a held button produces one press edge and then nothing until it is let
+  //   go, so the hold could never be measured -- the pass that would have timed
+  //   it returned first. That is why 5-page skip did nothing on the device.
+  //
+  //   turns counted during a redraw are flushed when the redraw ends, and the
+  //   end of a redraw is not an edge either. They sat in the queue until the
+  //   next press, which then turned three pages at once.
+  //
+  // The cost of not returning is two GPIO state reads and an int compare per
+  // pass, which is what the pass already spends reading the buttons.
 
   // Counted rather than acted on while the screen is still being drawn, then
   // applied together. See PageTurnQueue.h for why the first press is never
@@ -1594,9 +1606,11 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
       // on .md for the same reason ruby and the indent are -- a checklist is not
       // typeset -- and on a break that is already the end of the source line,
       // where there is no next line to push into. See Kinsoku.h.
+#if !defined(TXT_NO_KINSOKU)
       if (aozoraMarkup && !isMarkdown && breakPos < segmentLen) {
         breakPos = kinsoku::adjustBreak(segment, segmentLen, breakPos);
       }
+#endif
 
       // The ruby strip is reserved before the line is admitted, because what it
       // costs is what decides whether it fits. Where the ruby was taken out is
@@ -1711,8 +1725,16 @@ void TxtReaderActivity::render(RenderLock&&) {
   size_t nextOffset = currentOffset;
   currentPageLines.clear();
   currentPageAttrs.clear();
+  // Split so "a page takes N ms" can say *which* half. Assembling a page is
+  // wrap arithmetic and SD reads; drawing it is glyph blitting and the panel.
+  // The two have nothing in common and a single figure cannot tell them apart.
+  const unsigned long assembleStart = millis();
+  const uint32_t advanceBefore = SdCardFont::advanceLookups();
+  const uint32_t glyphBefore = SdCardFont::glyphLoads();
+  const uint32_t heapBefore = ESP.getFreeHeap();
   loadPageAtOffset(currentOffset, currentPageLines, &currentPageAttrs, nextOffset,
                    isMarkdown ? &pageCheckboxes : nullptr);
+  const unsigned long assembleMs = millis() - assembleStart;
   // Upholds the invariant on currentPageNextOffset: this is the only path that
   // draws a page, and paging forward reads this instead of the index.
   currentPageNextOffset = nextOffset;
@@ -1733,8 +1755,39 @@ void TxtReaderActivity::render(RenderLock&&) {
   checkboxPageStamp = currentPage;
   enteredFromForward = false;
 
+  const unsigned long drawStart = millis();
   renderer.clearScreen();
   renderPage();
+  const unsigned long drawMs = millis() - drawStart;
+
+#if READER_OPEN_DIAG
+  // One line per page in /page-timing.txt, capped: the first pages of a book are
+  // where the index is still building and the font cache still cold, which is
+  // exactly the interval being asked about, and an uncapped file would fill the
+  // card on a long read.
+  if (pageTimingWritten < PAGE_TIMING_MAX) {
+    pageTimingWritten++;
+    char line[192];
+    const int n = snprintf(
+        line, sizeof(line),
+        "%lu p%d vert=%d n=%d asm=%lu draw=%lu adv=%lu glyph=%lu "
+        "heap=%lu->%lu max=%lu min=%lu lines=%u\n",
+        static_cast<unsigned long>(millis()),
+        currentPage + 1, isVertical ? 1 : 0, PageBudget(pageExtent, normalPitch).linesAtFloor(), assembleMs, drawMs,
+        static_cast<unsigned long>(SdCardFont::advanceLookups() - advanceBefore),
+        static_cast<unsigned long>(SdCardFont::glyphLoads() - glyphBefore), static_cast<unsigned long>(heapBefore),
+        static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()),
+        static_cast<unsigned long>(ESP.getMinFreeHeap()), static_cast<unsigned>(currentPageLines.size()));
+    if (n > 0) {
+      HalFile log = Storage.open("/page-timing.txt", O_WRITE | O_CREAT | O_AT_END);
+      if (log) {
+        log.write(line, static_cast<size_t>(n));
+        log.flush();
+        log.close();
+      }
+    }
+  }
+#endif
 
   // Save progress
   saveProgress();

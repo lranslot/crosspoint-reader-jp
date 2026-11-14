@@ -1417,6 +1417,8 @@ uint8_t SdCardFont::resolveStyleMask(uint8_t styleMask) const {
 
 // --- On-demand glyph loading (overflow buffer) ---
 
+uint32_t SdCardFont::advanceLookups_ = 0;
+uint32_t SdCardFont::glyphLoads_ = 0;
 uint32_t SdCardFont::glyphRetries_ = 0;
 uint32_t SdCardFont::glyphFailures_ = 0;
 
@@ -1526,6 +1528,7 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   self->overflow_[slot].codepoint = codepoint;
   self->overflow_[slot].styleIdx = styleIdx;
 
+  glyphLoads_++;
   LOG_DBG("SDCF", "Overflow: loaded U+%04X style %u on demand (slot %u/%u)", codepoint, styleIdx, slot,
           OVERFLOW_CAPACITY);
 

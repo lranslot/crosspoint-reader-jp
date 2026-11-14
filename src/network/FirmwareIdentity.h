@@ -38,10 +38,26 @@ namespace firmware_identity {
 // real firmware.bin: the magic sits at exactly this offset.
 constexpr size_t DESC_OFFSET = 32;
 constexpr uint32_t DESC_MAGIC = 0xABCD5432;
-// app_elf_sha256 is at +128 inside esp_app_desc_t, 32 bytes long.
-constexpr size_t SHA_OFFSET_IN_DESC = 128;
+// app_elf_sha256 inside esp_app_desc_t. The whole layout, because an offset
+// into a struct is not a thing to count on one's fingers -- getting this wrong
+// is what made the first version of this check answer "different" for an
+// identical image, every time:
+//
+//   +0   uint32 magic_word          +80  char time[16]
+//   +4   uint32 secure_version      +96  char date[16]
+//   +8   uint32 reserv1[2]          +112 char idf_ver[32]
+//   +16  char version[32]           +144 uint8 app_elf_sha256[32]
+//   +48  char project_name[32]      +176 ... efuse rev, mmu page size, reserved
+//
+// 112 + 32 = 144. The first version used 128, which reads the last 16 bytes of
+// idf_ver followed by the first 16 of the hash. On a real image idf_ver is
+// "5.5.2.260206" and the rest of its 32 bytes are zero, so the window looked
+// half plausible -- sixteen zeros and sixteen bytes that really did differ
+// between builds -- and compared unequal to the running app's real hash every
+// time. Verified on a real firmware.bin at both offsets; see the test.
+constexpr size_t SHA_OFFSET_IN_DESC = 144;
 constexpr size_t SHA_BYTES = 32;
-// Everything above fits in the first 192 bytes, so a 5.6 MB image costs one
+// Everything above fits in the first 208 bytes, so a 5.6 MB image costs one
 // short read to identify.
 constexpr size_t HEAD_BYTES = DESC_OFFSET + SHA_OFFSET_IN_DESC + SHA_BYTES;
 

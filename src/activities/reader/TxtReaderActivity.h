@@ -290,7 +290,16 @@ class TxtReaderActivity final : public Activity {
   // it. Vertical never had the bug -- it multiplies the cell by
   // COLUMN_RATIO_PERCENT[lineSpacing] -- so the two directions now both honour
   // it, each in its own axis, and neither applies it twice.
+  // Two compile-time switches, so the contribution of each of the two changes
+  // 焼き7 made to horizontal layout can be measured separately on the device
+  // rather than argued about:
+  //   -DTXT_NO_KINSOKU      lay out as if 禁則処理 were not there
+  //   -DTXT_RAW_LINE_PITCH  spend the raw advanceY, as before the spacing fix
+  // Neither is set in any committed environment.
   [[nodiscard]] static int horizontalLinePitch(int rawLineHeight) {
+#if defined(TXT_RAW_LINE_PITCH)
+    return std::max(1, rawLineHeight);
+#endif
     return std::max(1,
                     static_cast<int>(static_cast<float>(rawLineHeight) * SETTINGS.getReaderLineCompression() + 0.5f));
   }
@@ -432,6 +441,12 @@ class TxtReaderActivity final : public Activity {
   // the index frontier going backwards. Reported on the diagnostic line for the
   // same reason as the others: serial output does not reach this device's user.
   uint16_t turnsShort = 0;
+#if READER_OPEN_DIAG
+  // Pages already written to /page-timing.txt. The first pages are the ones the
+  // question is about; past that the file is only growing.
+  static constexpr uint16_t PAGE_TIMING_MAX = 40;
+  uint16_t pageTimingWritten = 0;
+#endif
   // Where the page starting at `offset` ends. Lays the page out when neither the
   // last render nor the index can say, which is what lets a multi-page turn work
   // past the index frontier.
