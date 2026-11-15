@@ -76,6 +76,22 @@ def get_base_version(project_dir):
     return config.get('crosspoint', 'version')
 
 
+def get_jp_tag(project_dir):
+    """The jp-* tag on HEAD, or '' when HEAD is not tagged.
+
+    Exact match only: a tag two commits back describes those two commits, not
+    this one, and calling an untagged build a release is how an unreleased
+    binary ends up on someone's card.
+    """
+    try:
+        out = subprocess.run(
+            ['git', 'describe', '--tags', '--exact-match', '--match', 'jp-*'],
+            cwd=project_dir, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    return out.stdout.strip() if out.returncode == 0 else ''
+
+
 def inject_version(env):
     # Only applies to development environments; release envs set the
     # version via build_flags in platformio.ini and are unaffected.
@@ -86,7 +102,25 @@ def inject_version(env):
     base_version = get_base_version(project_dir)
     branch = get_git_branch(project_dir)
     short_sha = get_git_short_sha(project_dir)
-    version_string = f'{base_version}-dev-{branch}-{short_sha}'
+
+    # This fork's own version, on top of the upstream one it is built from:
+    #
+    #   1.5.0-jp-0.2          a tagged release (git tag jp-0.2)
+    #   1.5.0-jp-dev-<sha>    everything else
+    #
+    # The upstream number stays in front on purpose. It is what tells a reader
+    # which upstream this is a Japanese build of, and the Escape Hatch note in
+    # the release checklist depends on it -- a 1.4 device refuses a 1.5 image,
+    # and the person holding the card needs to see which they have.
+    #
+    # The branch name is gone from the untagged form. It was there to tell two
+    # development branches apart on one desk, and it leaks a working detail into
+    # a string shown on the device's boot screen.
+    jp_tag = get_jp_tag(project_dir)
+    if jp_tag:
+        version_string = f'{base_version}-{jp_tag}'
+    else:
+        version_string = f'{base_version}-jp-dev-{short_sha}'
 
     env.Append(CPPDEFINES=[('CROSSPOINT_VERSION', f'\\"{version_string}\\"')])
     print(f'CrossPoint build version: {version_string}')
