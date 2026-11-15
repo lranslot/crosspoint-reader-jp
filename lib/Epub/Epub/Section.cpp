@@ -1,6 +1,7 @@
 #include "Section.h"
 
 #include <HalStorage.h>
+#include <HeapDiag.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <Serialization.h>
@@ -365,6 +366,17 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     ctx->cssParser = epub->getCssParser();
     if (ctx->cssParser && !ctx->cssParser->loadFromCache()) {
       LOG_ERR("SCT", "Failed to load CSS from cache");
+    }
+    // This, not parseCssFiles(), is where the rules are resident while layout
+    // runs: the book-wide parse happens once and releases, but every chapter
+    // build reloads the whole map and holds it for the duration. The crash
+    // under investigation is here, so the count and the heap are sampled here
+    // as well. rules= is selectors retained; see Epub::parseCssFiles for what
+    // the two counters mean.
+    if (ctx->cssParser) {
+      char detail[64];
+      snprintf(detail, sizeof(detail), "spine=%d rules=%u", spineIndex, (unsigned)ctx->cssParser->ruleCount());
+      heapdiag::sample("section-css", detail);
     }
   }
 

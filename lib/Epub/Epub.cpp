@@ -266,8 +266,12 @@ void Epub::parseCssFiles() const {
     // Not a free path: loadFromCache() puts every rule back into the map, so a
     // cached open pays the same resident cost as the first one. The sample is
     // taken here to show that.
-    char cached[48];
-      snprintf(cached, sizeof(cached), "cached rules=%u", (unsigned)cssParser->ruleCount());
+    // ruleCount() would be 0 here: hasCache() only tests for the file, it does
+    // not load it, so the map is still empty on this path. Read the count out
+    // of the cache header instead -- that is the number of rules the next
+    // loadFromCache() will make resident.
+    char cached[64];
+    snprintf(cached, sizeof(cached), "cached rules=%u (not yet resident)", (unsigned)cssParser->cachedRuleCount());
     heapdiag::sample("epub-css-after", cached);
     return;
   }
@@ -366,13 +370,32 @@ void Epub::parseCssFiles() const {
 
   LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files (%zu identical duplicates skipped)", cssParser->ruleCount(),
           cssFiles.size(), skippedDuplicates);
+
+  // Read the counters BEFORE clear(), and sample before it too. The first
+  // version of this instrument did neither: it called clear() and then asked
+  // the emptied map for its size, so every book on the card reported
+  // "rules=0 dropped=0" -- the one number the MAX_RULES cap is watched
+  // through. Same shape as section 8.8-33: a sample placed after a release
+  // measures the release, not the thing being released.
+  //
+  // rules  = selectors retained, one unordered_map node each (88 bytes
+  //          measured at CssStyle = 56; see RULE_BYTES in CssParser.cpp)
+  // dropped= selectors refused for want of room, i.e. MAX_RULES was reached.
+  //          Expected 0; any non-zero figure means this book is being
+  //          rendered with styles missing, and the cap needs raising or the
+  //          retention narrowing. droppedForLimit_ survives clear().
+  //
+  // Expected on the four books of the test card: 0 (no CSS), 40 (Ichitaro),
+  // 501 (denden), 536 (AozoraEpub3).
+  const unsigned parsedRules = (unsigned)cssParser->ruleCount();
+  const unsigned droppedRules = (unsigned)cssParser->droppedRuleCount();
+  char parsed[64];
+  snprintf(parsed, sizeof(parsed), "parsed rules=%u dropped=%u", parsedRules, droppedRules);
+  // Peak: the rules are still resident here. This is the figure that tells us
+  // what a Densho-kyo-template book costs to parse.
+  heapdiag::sample("epub-css-peak", parsed);
   cssParser->clear();
-  // After the parse: this is the number the two crashing books are carrying
-  // into section building, with the framebuffer loan and the fonts still to
-  // come out of what is left.
-  char parsed[48];
-  snprintf(parsed, sizeof(parsed), "parsed rules=%u dropped=%u", (unsigned)cssParser->ruleCount(),
-           (unsigned)cssParser->droppedRuleCount());
+  // And after the release, so the two together give the cost of holding them.
   heapdiag::sample("epub-css-after", parsed);
 }
 

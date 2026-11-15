@@ -800,6 +800,20 @@ bool CssParser::saveToCache() const {
   return true;
 }
 
+size_t CssParser::cachedRuleCount() const {
+  // Header only: one version byte then the uint16 count. Deliberately does not
+  // reuse loadFromCache(), which would put every rule back into the map -- the
+  // caller is asking what a load WOULD cost, not paying for one.
+  if (cachePath.empty()) return 0;
+  HalFile file;
+  if (!Storage.openFileForRead("CSS", cachePath + rulesCache, file)) return 0;
+  uint8_t version = 0;
+  if (file.read(&version, 1) != 1 || version != CssParser::CSS_CACHE_VERSION) return 0;
+  uint16_t count = 0;
+  if (file.read(&count, sizeof(count)) != sizeof(count)) return 0;
+  return count;
+}
+
 bool CssParser::loadFromCache() {
   if (cachePath.empty()) {
     return false;

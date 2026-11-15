@@ -80,7 +80,16 @@ class CssParser {
   [[nodiscard]] size_t ruleCount() const { return rulesBySelector_.size(); }
 
   // How many selectors were refused for want of room. See droppedForLimit_.
+  // Not reset by clear(), so it can be read after the map has been released.
   [[nodiscard]] size_t droppedRuleCount() const { return droppedForLimit_; }
+
+  /**
+   * How many rules the cache file holds, read from its header without loading
+   * them. Returns 0 if there is no cache, it is the wrong version, or it
+   * cannot be read -- callers use this for diagnostics only, where "no cache"
+   * and "an empty cache" are the same answer.
+   */
+  [[nodiscard]] size_t cachedRuleCount() const;
 
   /**
    * Clear all loaded rules
