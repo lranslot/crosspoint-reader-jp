@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <HalClock.h>
+#include <HeapDiag.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -104,6 +105,11 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   delay(100);
 
   // Start async scan
+  // The scan is the heaviest thing station mode does that AP mode never does:
+  // it allocates a record per access point in range and drives the radio across
+  // every channel. Both of the suspected mechanisms -- a failed allocation and a
+  // brownout -- would land here.
+  heapdiag::sample("net-scan-start");
   WiFi.scanNetworks(true);  // true = async scan
 }
 
@@ -367,6 +373,7 @@ void WifiSelectionActivity::attemptConnection() {
   WiFi.setHostname(hostname.c_str());
 
   if (selectedRequiresPassword && !enteredPassword.empty()) {
+    heapdiag::sample("net-join-before");
     WiFi.begin(selectedSSID.c_str(), enteredPassword.c_str());
   } else {
     WiFi.begin(selectedSSID.c_str());

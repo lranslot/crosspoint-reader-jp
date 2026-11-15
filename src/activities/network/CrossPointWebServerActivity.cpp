@@ -3,6 +3,7 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <GfxRenderer.h>
+#include <HeapDiag.h>
 #include <I18n.h>
 #include <WiFi.h>
 
@@ -141,7 +142,13 @@ void CrossPointWebServerActivity::onNetworkModeSelected(const NetworkMode mode) 
   if (mode == NetworkMode::JOIN_NETWORK) {
     // STA mode - launch WiFi selection
     LOG_DBG("WEBACT", "Turning on WiFi (STA mode)...");
+    // Heap readings around the network start, written to the card because serial
+    // does not reach this device's user. Station crashes and AP does not, so the
+    // same tags are taken on both paths: the difference between the two columns
+    // is the evidence, not either one alone.
+    heapdiag::sample("net-sta-before");
     WiFi.mode(WIFI_STA);
+    heapdiag::sample("net-sta-mode");
 
     state = WebServerActivityState::WIFI_SELECTION;
     LOG_DBG("WEBACT", "Launching WifiSelectionActivity...");
@@ -194,7 +201,9 @@ void CrossPointWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "Free heap before AP start: %d bytes", ESP.getFreeHeap());
 
   // Configure and start the AP
+  heapdiag::sample("net-ap-before");
   WiFi.mode(WIFI_AP);
+  heapdiag::sample("net-ap-mode");
   delay(100);
 
   // Start soft AP

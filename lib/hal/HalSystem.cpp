@@ -122,7 +122,57 @@ std::string getPanicInfo(bool full) {
     std::string info;
 
     info += "CrossPoint version: " CROSSPOINT_VERSION;
+
+    // ★ The reset reason, because an empty panic reason is not an absence of
+    // information -- it says the reboot did not come through panic_abort(), and
+    // which non-panic path it came through is the whole question.
+    //
+    // panicMessage is filled only by __wrap_panic_abort() above. Everything that
+    // reboots without calling it leaves the string as clearPanic() left it, i.e.
+    // empty: a brownout (esp_brownout_isr goes straight to esp_restart_noos), an
+    // RTC watchdog, a supply collapse, or a plain esp_restart(). Those are very
+    // different faults and the report could not tell them apart.
+    const char* resetName = "?";
+    switch (esp_reset_reason()) {
+      case ESP_RST_POWERON:
+        resetName = "POWERON";
+        break;
+      case ESP_RST_EXT:
+        resetName = "EXT";
+        break;
+      case ESP_RST_SW:
+        resetName = "SW (esp_restart)";
+        break;
+      case ESP_RST_PANIC:
+        resetName = "PANIC";
+        break;
+      case ESP_RST_INT_WDT:
+        resetName = "INT_WDT";
+        break;
+      case ESP_RST_TASK_WDT:
+        resetName = "TASK_WDT";
+        break;
+      case ESP_RST_WDT:
+        resetName = "WDT (other)";
+        break;
+      case ESP_RST_DEEPSLEEP:
+        resetName = "DEEPSLEEP";
+        break;
+      case ESP_RST_BROWNOUT:
+        resetName = "BROWNOUT";
+        break;
+      case ESP_RST_SDIO:
+        resetName = "SDIO";
+        break;
+      default:
+        resetName = "UNKNOWN";
+        break;
+    }
+    info += "\n\nReset reason: " + std::string(resetName);
     info += "\n\nPanic reason: " + std::string(panicMessage);
+    if (panicMessage[0] == '\0') {
+      info += "  (empty: this reboot did not go through panic_abort(); read the reset reason above)";
+    }
     info += "\n\nLast logs:\n" + getLastLogs();
     info += "\n\nStack memory:\n";
 
