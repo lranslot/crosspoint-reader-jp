@@ -82,8 +82,19 @@ its header. To compare:
 
 ```
 layout_harness pages <corpus-dir> | findstr "pages=" > now.txt
-diff baseline/pages-summary.txt now.txt    # header lines differ; data should not
+diff baseline/pages-summary.txt now.txt
 ```
+
+★ **Read the header first.** It records the revision the baseline was taken at.
+A baseline from before some other change reports that change's page counts as a
+difference on every run, so check it is a revision your own change can be
+compared against *before* reading a single data row. A stale baseline rang 24
+times out of 24 on the band change and none of them were real.
+
+And when the data rows do differ: a baseline refreshed because it rang bakes
+whatever rang into it. Refresh it in the same commit as the change that
+justifies the new numbers, having read the rows one by one. See section 8.8
+item 32 of the spec.
 
 ## Corpus
 
