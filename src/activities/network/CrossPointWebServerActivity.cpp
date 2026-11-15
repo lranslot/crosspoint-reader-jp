@@ -12,6 +12,7 @@
 #include "MappedInputManager.h"
 #include "NetworkModeSelectionActivity.h"
 #include "SilentRestart.h"
+#include "network/NetworkHeapGuard.h"
 #include "WifiSelectionActivity.h"
 #include "activities/network/CalibreConnectActivity.h"
 #include "components/UITheme.h"
@@ -65,6 +66,14 @@ void CrossPointWebServerActivity::onEnter() {
   Activity::onEnter();
 
   LOG_DBG("WEBACT", "Free heap at onEnter: %d bytes", ESP.getFreeHeap());
+
+  // The file-transfer route gets its own guard, ahead of the one inside the
+  // scan, for one reason: this is the only route whose destination can be
+  // returned to after a reboot, so it is the only one that can pass
+  // Target::FileTransfer and come back to where the reader was going.
+  //
+  // May not return: see NetworkHeapGuard.h.
+  netheap::ensureHeadroom(renderer, "web-enter", netheap::Target::FileTransfer);
 
   // Reset state
   state = WebServerActivityState::MODE_SELECTION;
@@ -206,6 +215,14 @@ void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) 
 void CrossPointWebServerActivity::startAccessPoint() {
   LOG_DBG("WEBACT", "Starting Access Point mode...");
   LOG_DBG("WEBACT", "Free heap before AP start: %d bytes", ESP.getFreeHeap());
+
+  // The access point never scans, so it never reaches the guard inside
+  // WifiSelectionActivity. It is cheaper than station mode but not free -- the
+  // mode switch alone took the largest free block from 114,676 to 69,620 on a
+  // fresh boot -- so it is gated too.
+  //
+  // May not return: see NetworkHeapGuard.h.
+  netheap::ensureHeadroom(renderer, "ap", netheap::Target::FileTransfer);
 
   // Configure and start the AP
   heapdiag::sample("net-ap-before");

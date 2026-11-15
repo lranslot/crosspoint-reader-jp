@@ -29,6 +29,7 @@
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "network/NetworkHeapGuard.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -119,6 +120,7 @@ RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
+constexpr uint32_t SILENT_REBOOT_TARGET_FILE_TRANSFER = 2;
 
 // How the device is coming back to life, resolved once at boot. Both resume
 // flows suppress the splash and leave the panel holding its pre-boot frame; a
@@ -157,6 +159,20 @@ void silentRestartToReader() {
   silentRebootMagic = SILENT_REBOOT_MAGIC;
   LOG_DBG("MAIN", "Silent restart (target=reader)");
   GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
+
+// Asked for by the pre-Wi-Fi heap guard, which reboots to recover the ~48 KB
+// that releasing caches cannot. It lands on the screen the reader was opening
+// rather than on Home, because arriving back at the shelf with no explanation is
+// indistinguishable from the request having been ignored.
+void silentRestartToFileTransfer() {
+  if (deepSleepInProgress) return;  // sleeping supersedes the heap-defrag reboot
+  silentRebootTarget = SILENT_REBOOT_TARGET_FILE_TRANSFER;
+  silentRebootMagic = SILENT_REBOOT_MAGIC;
+  LOG_DBG("MAIN", "Silent restart (target=file transfer)");
+  // No popup here: the guard has already drawn its own, saying why.
   delay(50);
   ESP.restart();
 }
@@ -285,7 +301,7 @@ void setup() {
   // Bound the target range too — RTC_NOINIT memory is uninitialized on cold boot.
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
   const uint32_t snapshotTarget =
-      (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_READER) ? silentRebootTarget : 0;
+      (isSilentReboot && silentRebootTarget <= SILENT_REBOOT_TARGET_FILE_TRANSFER) ? silentRebootTarget : 0;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
 
@@ -421,6 +437,12 @@ void setup() {
   } else if (HalSystem::isRebootFromPanic()) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_FILE_TRANSFER) {
+    // The pre-Wi-Fi heap guard rebooted to free the heap; carry the reader on
+    // to the screen they asked for. suppressNextCheck() stops the guard from
+    // measuring again and rebooting in a loop if even a fresh boot is short.
+    netheap::suppressForThisBoot();
+    activityManager.goToFileTransfer();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_READER &&
              !APP_STATE.openEpubPath.empty()) {
     APP_STATE.bootOpenedReader = true;  // for the open diagnostic only

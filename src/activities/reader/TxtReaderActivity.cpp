@@ -178,19 +178,20 @@ void TxtReaderActivity::onExit() {
   txt.reset();
   heapdiag::sample("reader-exit-book");
 
-  // (3) The on-demand glyph bitmaps: 128 separate new[] blocks, one per glyph,
-  // held by the font object -- which is global and therefore outlives this
-  // activity entirely. This is the suspected scatter.
-  const int glyphFonts = sdFontSystem.releaseFontCaches(false);
-  snprintf(detail, sizeof(detail), "fonts=%d", glyphFonts);
-  heapdiag::sample("reader-exit-glyph", detail);
-
-  // (4) The per-style advance tables, which clearCache() deliberately keeps:
-  // up to 768 entries x 8 bytes x 4 styles per loaded font, allocated during
-  // indexing and never returned until the font is unloaded.
-  const int advFonts = sdFontSystem.releaseFontCaches(true);
-  snprintf(detail, sizeof(detail), "fonts=%d", advFonts);
-  heapdiag::sample("reader-exit-advance", detail);
+  // The font caches are deliberately NOT released here.
+  //
+  // They were, while the question was how much each holder was worth. The
+  // measurement answered it: the on-demand glyph bitmaps returned 0 bytes
+  // (reader-exit-glyph was identical to reader-exit-book on every run), and
+  // the advance tables returned 4,868 and 5,380 B of free heap but moved the
+  // largest block from 30,708 to 30,708 on one run and 34,804 to 61,428 on
+  // another. Useful, but nowhere near the ~48 KB that separates a post-reading
+  // heap from a fresh boot, so releasing here never prevented the crash.
+  //
+  // What it did do was charge every reader a re-read from the SD card on the
+  // next page drawn, whether or not they ever opened a network screen. The
+  // release now happens in netheap::ensureHeadroom(), at the moment the
+  // network is entered, which is the only moment it buys anything.
 }
 
 void TxtReaderActivity::loop() {

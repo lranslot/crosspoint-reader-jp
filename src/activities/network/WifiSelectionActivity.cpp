@@ -1,3 +1,4 @@
+#include "network/NetworkHeapGuard.h"
 #include "WifiSelectionActivity.h"
 
 #include <GfxRenderer.h>
@@ -93,6 +94,22 @@ void WifiSelectionActivity::onExit() {
 }
 
 void WifiSelectionActivity::startWifiScan(const bool autoScan) {
+  // The chokepoint for station mode. Nine places launch this activity -- file
+  // transfer, Calibre, OTA, font download, clock sync, OPDS, KOReader auth and
+  // sync, settings -- and every one of them arrives here before WiFi.mode()
+  // below. Guarding the activity rather than its callers covers all nine with
+  // one check, and puts the check where the radio is actually turned on.
+  //
+  // Target::Home, not FileTransfer: this activity does not know which of the
+  // nine routes launched it, and landing an OTA request on the file-transfer
+  // screen would answer a question nobody asked. The file-transfer route has
+  // its own guard earlier, in CrossPointWebServerActivity::onEnter(), so that
+  // one does come back to where it was going. The rest get the popup saying
+  // why, then Home -- explained, not silent.
+  //
+  // May not return: see NetworkHeapGuard.h.
+  netheap::ensureHeadroom(renderer, "sta", netheap::Target::Home);
+
   autoConnecting = autoScan;
   manualNetworkListRequested = false;
   state = WifiSelectionState::SCANNING;

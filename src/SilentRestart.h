@@ -5,4 +5,5 @@
 // heap fragmentation accumulated during a wifi session.
 
 void silentRestart();          // home screen
-void silentRestartToReader();  // currently-open EPUB (APP_STATE.openEpubPath)
+void silentRestartToReader();        // currently-open EPUB (APP_STATE.openEpubPath)
+void silentRestartToFileTransfer();  // the file-transfer screen the reader just asked for
