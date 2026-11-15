@@ -1,6 +1,7 @@
 #include "Epub.h"
 
 #include <FsHelpers.h>
+#include <HeapDiag.h>
 #include <HalStorage.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
@@ -238,6 +239,15 @@ void Epub::discoverCssFilesFromZip() {
 }
 
 void Epub::parseCssFiles() const {
+  // The stylesheets are the largest thing a Densho-kyo-template book brings
+  // with it, and the cost is per retained rule rather than per byte or per
+  // file. Counted on the four books on the card: 0 rules for a book with no
+  // CSS, 40 for an Ichitaro book, 501 for the denden template and 536 for
+  // AozoraEpub3 -- the last two at a measured 136 bytes per rule, i.e. ~68 and
+  // ~73 KB out of a ~130 KB free heap, before the bucket array. Those are the
+  // two books that show 1/1 and then abort on a page turn. Sampled either side
+  // so the claim is the device's, not an arithmetic one.
+  heapdiag::sample("epub-css-before");
   // Maximum CSS file size we'll attempt to parse (uncompressed)
   // Larger files risk memory exhaustion on ESP32
   constexpr size_t MAX_CSS_FILE_SIZE = 128 * 1024;  // 128KB
@@ -253,6 +263,12 @@ void Epub::parseCssFiles() const {
   // See if we have a cached version of the CSS rules
   if (cssParser->hasCache()) {
     LOG_DBG("EBP", "CSS cache exists, skipping parseCssFiles");
+    // Not a free path: loadFromCache() puts every rule back into the map, so a
+    // cached open pays the same resident cost as the first one. The sample is
+    // taken here to show that.
+    char cached[48];
+    snprintf(cached, sizeof(cached), "cached rules=%u", (unsigned)cssParser->ruleCount());
+    heapdiag::sample("epub-css-after", cached);
     return;
   }
 
@@ -351,6 +367,12 @@ void Epub::parseCssFiles() const {
   LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files (%zu identical duplicates skipped)", cssParser->ruleCount(),
           cssFiles.size(), skippedDuplicates);
   cssParser->clear();
+  // After the parse: this is the number the two crashing books are carrying
+  // into section building, with the framebuffer loan and the fonts still to
+  // come out of what is left.
+  char parsed[48];
+  snprintf(parsed, sizeof(parsed), "parsed rules=%u", (unsigned)cssParser->ruleCount());
+  heapdiag::sample("epub-css-after", parsed);
 }
 
 // load in the meta data for the epub file
