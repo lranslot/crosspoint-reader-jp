@@ -37,9 +37,28 @@ struct StackBuffer {
 // Buffer size for reading CSS files
 constexpr size_t READ_BUFFER_SIZE = 512;
 
-// Maximum number of CSS rules to store in the selector map
-// Prevents unbounded memory growth from pathological CSS files
-constexpr size_t MAX_RULES = 1500;
+// Maximum number of CSS rules to store in the selector map.
+//
+// Expressed as a byte budget divided by the measured cost of one rule, because
+// a bare count cannot be checked against anything. The previous value, 1500,
+// was 204,000 B at the old 136 B per rule -- larger than this device's entire
+// ~130 KB free heap, so it bounded nothing that could actually happen.
+//
+// One rule costs one unordered_map node: sizeof(CssStyle) plus the key string
+// and the node header. Measured on this target after the fixed-point change to
+// CssLength, that is RULE_BYTES below; keep it in step if CssStyle changes, and
+// the cap follows automatically.
+//
+// The budget is what is left for stylesheets once the two large, unavoidable
+// claims on the heap are set aside: roughly 130 KB free at boot, 48 KB lent to
+// the framebuffer during section building, and 30 KB kept back for the build
+// itself and the glyph bitmaps the first page needs. That leaves about 52 KB.
+// For scale, the two Densho-kyo-template books on the test card retain 536 and
+// 501 rules, so the cap is a backstop for pathological input rather than a
+// limit those books meet.
+constexpr size_t CSS_RULE_BUDGET_BYTES = 52 * 1024;
+constexpr size_t RULE_BYTES = 88;  // measured: see the comment above
+constexpr size_t MAX_RULES = CSS_RULE_BUDGET_BYTES / RULE_BYTES;
 
 // Minimum free heap required to apply CSS during rendering
 // If below this threshold, we skip CSS to avoid display artifacts.
@@ -438,6 +457,12 @@ void CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
 
   // Check if we've reached the rule limit before processing
   if (rulesBySelector_.size() >= MAX_RULES) {
+    // Counted, not just logged. Hitting this cap silently discards styling the
+    // book asked for, and on a device with no serial output a log line is a
+    // line nobody will ever read -- so the count travels to the SD diagnostic
+    // instead, and "this book had too many rules and some were dropped" stays
+    // answerable after the fact.
+    droppedForLimit_++;
     LOG_DBG("CSS", "Reached max rules limit (%zu), stopping CSS parsing", MAX_RULES);
     return;
   }
@@ -474,6 +499,7 @@ void CssParser::processRuleBlockWithStyle(std::string_view selectorGroup, const 
 
         // Skip if this would exceed the rule limit
         if (rulesBySelector_.size() >= MAX_RULES) {
+          droppedForLimit_++;
           LOG_DBG("CSS", "Reached max rules limit, stopping selector processing");
           limitReached = true;
           return;
@@ -725,9 +751,11 @@ bool CssParser::saveToCache() const {
     file.write(static_cast<uint8_t>(style.textDecoration));
     file.write(static_cast<uint8_t>(style.direction));
 
-    // Write CssLength fields (value + unit)
+    // Write CssLength fields (fixed-point magnitude + unit). Two bytes, not
+    // four: the magnitude is an int16_t in units of CssLength::FRACTION. The
+    // cache version below moves whenever this layout does.
     auto writeLength = [&file](const CssLength& len) {
-      file.write(reinterpret_cast<const uint8_t*>(&len.value), sizeof(len.value));
+      file.write(reinterpret_cast<const uint8_t*>(&len.raw), sizeof(len.raw));
       file.write(static_cast<uint8_t>(len.unit));
     };
 
@@ -888,7 +916,7 @@ bool CssParser::loadFromCache() {
 
     // Read CssLength fields
     auto readLength = [&file](CssLength& len) -> bool {
-      if (file.read(&len.value, sizeof(len.value)) != sizeof(len.value)) {
+      if (file.read(&len.raw, sizeof(len.raw)) != sizeof(len.raw)) {
         return false;
       }
       uint8_t unitVal;

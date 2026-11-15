@@ -267,7 +267,7 @@ void Epub::parseCssFiles() const {
     // cached open pays the same resident cost as the first one. The sample is
     // taken here to show that.
     char cached[48];
-    snprintf(cached, sizeof(cached), "cached rules=%u", (unsigned)cssParser->ruleCount());
+      snprintf(cached, sizeof(cached), "cached rules=%u", (unsigned)cssParser->ruleCount());
     heapdiag::sample("epub-css-after", cached);
     return;
   }
@@ -371,7 +371,8 @@ void Epub::parseCssFiles() const {
   // into section building, with the framebuffer loan and the fonts still to
   // come out of what is left.
   char parsed[48];
-  snprintf(parsed, sizeof(parsed), "parsed rules=%u", (unsigned)cssParser->ruleCount());
+  snprintf(parsed, sizeof(parsed), "parsed rules=%u dropped=%u", (unsigned)cssParser->ruleCount(),
+           (unsigned)cssParser->droppedRuleCount());
   heapdiag::sample("epub-css-after", parsed);
 }
 

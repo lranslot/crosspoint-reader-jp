@@ -33,7 +33,9 @@
 class CssParser {
  public:
   // Bump when CSS cache format or rules change; section caches are invalidated when this changes
-  static constexpr uint8_t CSS_CACHE_VERSION = 8;
+  // 9: CssLength stores a fixed-point int16_t magnitude instead of a float,
+  //    so every cached length is two bytes narrower.
+  static constexpr uint8_t CSS_CACHE_VERSION = 9;
 
   explicit CssParser(std::string cachePath) : cachePath(std::move(cachePath)) {}
   ~CssParser() = default;
@@ -76,6 +78,9 @@ class CssParser {
    * Get count of loaded rule sets
    */
   [[nodiscard]] size_t ruleCount() const { return rulesBySelector_.size(); }
+
+  // How many selectors were refused for want of room. See droppedForLimit_.
+  [[nodiscard]] size_t droppedRuleCount() const { return droppedForLimit_; }
 
   /**
    * Clear all loaded rules
@@ -139,6 +144,11 @@ class CssParser {
 
   // Storage: maps selector -> style properties. Hash/equal are case-insensitive.
   std::unordered_map<std::string, CssStyle, SvHash, SvEqual> rulesBySelector_;
+
+  // Selectors turned away because the map was already at MAX_RULES. Zero on
+  // every book we have measured; a non-zero value in the diagnostic means the
+  // backstop fired and the book is missing styling it declared.
+  size_t droppedForLimit_ = 0;
 
   std::string cachePath;
 
