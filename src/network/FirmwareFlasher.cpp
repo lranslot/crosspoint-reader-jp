@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <HalStorage.h>
+#include <HalSystem.h>
 #include <Logging.h>
 #include <esp_app_desc.h>
 #include <esp_ota_ops.h>
@@ -400,6 +401,15 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
     LOG_ERR("FLASH", "otadata switch failed");
     return Result::OTADATA_FAIL;
   }
+
+  // Past this line the next boot is a different binary, so any crash report
+  // still on the card belongs to the version being replaced. Move it aside
+  // before the new firmware can write over it -- the stale report is otherwise
+  // read as the new version's, which is how a fixed crash gets reported again.
+  // Both update routes (SD and OTA) reach this one point, so this is the only
+  // place it has to be done.
+  HalSystem::archiveCrashReportForUpdate();
+
   return Result::OK;
 }
 

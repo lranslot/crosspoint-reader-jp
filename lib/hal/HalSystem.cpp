@@ -1,5 +1,6 @@
 #include "HalSystem.h"
 
+#include <cstring>
 #include <string>
 
 #include "Arduino.h"
@@ -14,6 +15,14 @@
 
 RTC_NOINIT_ATTR char panicMessage[256];
 RTC_NOINIT_ATTR HalSystem::StackFrame panicStack[MAX_PANIC_STACK_DEPTH];
+
+// Which binary was running when the panic happened. Written at begin() on every
+// boot that is NOT a panic reboot, so on a panic reboot it still holds the
+// version of the image that faulted -- which is a different image from the one
+// now running whenever the panic happened during an update. See
+// HalSystem::panickedVersion().
+#define RUNNING_VERSION_LEN 48
+RTC_NOINIT_ATTR char runningVersion[RUNNING_VERSION_LEN];
 
 extern "C" {
 
@@ -82,6 +91,9 @@ void begin() {
   // `clearPanic()` to clear it after dumping
   if (!isRebootFromPanic()) {
     clearPanic();
+    // Record which binary this is, for the next panic to report. Deliberately
+    // NOT written on a panic reboot: the value left there is the whole point.
+    snprintf(runningVersion, RUNNING_VERSION_LEN, "%s", CROSSPOINT_VERSION);
   } else {
     // Panic reboot: preserve logs and panic info, but clamp logHead in case the
     // panic occurred before begin() ever ran (e.g. in a static constructor).
@@ -122,6 +134,21 @@ std::string getPanicInfo(bool full) {
     std::string info;
 
     info += "CrossPoint version: " CROSSPOINT_VERSION;
+
+    // The version that faulted, when it is not this one. Printed before
+    // anything else that could be misread, because every line below it belongs
+    // to that binary and not to this one.
+    const char* faulted = panickedVersion();
+    if (faulted[0] != '\0' && strcmp(faulted, CROSSPOINT_VERSION) != 0) {
+      info += "\n\n*** This report was written by a DIFFERENT firmware than the one that crashed.";
+      info += "\n*** Crashed in : ";
+      info += faulted;
+      info += "\n*** Reported by: " CROSSPOINT_VERSION;
+      info += "\n*** The logs and stack below belong to the crashed version.";
+      info += "\n*** This normally means the panic happened during a firmware update.";
+    } else if (faulted[0] == '\0') {
+      info += "\n(The crashed version could not be confirmed: RTC memory does not survive power loss.)";
+    }
 
     // ★ The reset reason, because an empty panic reason is not an absence of
     // information -- it says the reboot did not come through panic_abort(), and
@@ -193,6 +220,38 @@ std::string getPanicInfo(bool full) {
     }
 
     return info;
+  }
+}
+
+const char* panickedVersion() {
+  // RTC_NOINIT survives a reset but not a power cut, so after a battery pull
+  // this is whatever those cells held. Accept it only if it is a NUL-terminated
+  // run of printable ASCII -- a version string always is, and random bytes
+  // almost never are. An unverifiable answer is reported as no answer.
+  for (size_t i = 0; i < RUNNING_VERSION_LEN; i++) {
+    const char c = runningVersion[i];
+    if (c == '\0') {
+      return i == 0 ? "" : runningVersion;  // empty is also "unknown"
+    }
+    if (c < 0x20 || c > 0x7E) break;
+  }
+  return "";
+}
+
+void archiveCrashReportForUpdate() {
+  if (!Storage.exists("/crash_report.txt")) return;
+  // Overwrite any older archive rather than accumulating: the question a stale
+  // report creates is "which firmware is this about", and one previous answer
+  // is enough to settle it. Remove first because rename onto an existing name
+  // fails on FAT.
+  if (Storage.exists("/crash_report.prev.txt")) {
+    Storage.remove("/crash_report.prev.txt");
+  }
+  if (Storage.rename("/crash_report.txt", "/crash_report.prev.txt")) {
+    LOG_INF("SYS", "Archived crash_report.txt as crash_report.prev.txt before update");
+  } else {
+    // Diagnostics must never block an install. Say so and continue.
+    LOG_ERR("SYS", "Could not archive crash_report.txt -- continuing with the update");
   }
 }
 

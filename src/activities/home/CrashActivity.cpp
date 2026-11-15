@@ -1,6 +1,7 @@
 #include "CrashActivity.h"
 
 #include <GfxRenderer.h>
+#include <cstring>
 #include <HalSystem.h>
 #include <I18n.h>
 
@@ -13,6 +14,11 @@ void CrashActivity::onEnter() {
   panicMessage = HalSystem::getPanicInfo(false);
   if (panicMessage.empty()) {
     panicMessage = tr(STR_CRASH_NO_REASON);
+  }
+  // Read this BEFORE clearPanic(), which drops the RTC state it comes from.
+  const char* faulted = HalSystem::panickedVersion();
+  if (faulted[0] != '\0' && strcmp(faulted, CROSSPOINT_VERSION) != 0) {
+    crashedVersion = faulted;
   }
   HalSystem::clearPanic();
 
@@ -53,6 +59,26 @@ void CrashActivity::render(RenderLock&&) {
   auto panicLines = renderer.wrappedText(UI_10_FONT_ID, panicMessage.c_str(), contentWidth, 5);
   for (const auto& line : panicLines) {
     renderer.drawText(UI_10_FONT_ID, x, y, line.c_str());
+    y += lineHeight;
+  }
+
+  // Only when the two differ. Printing "crashed in X, running X" on every
+  // crash would be noise, and noise on a screen shown once per fault is how a
+  // real warning stops being read.
+  if (!crashedVersion.empty()) {
+    y += metrics.verticalSpacing * 2;
+    auto warnLines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_CRASH_VERSION_MISMATCH), contentWidth, 4);
+    for (const auto& line : warnLines) {
+      renderer.drawText(UI_10_FONT_ID, x, y, line.c_str());
+      y += lineHeight;
+    }
+    y += metrics.verticalSpacing;
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s %s", tr(STR_CRASH_VERSION_CRASHED), crashedVersion.c_str());
+    renderer.drawText(UI_10_FONT_ID, x, y, buf);
+    y += lineHeight;
+    snprintf(buf, sizeof(buf), "%s %s", tr(STR_CRASH_VERSION_RUNNING), CROSSPOINT_VERSION);
+    renderer.drawText(UI_10_FONT_ID, x, y, buf);
     y += lineHeight;
   }
 
