@@ -63,6 +63,12 @@ class CrossPointWebServer {
   // Check if server is running
   bool isRunning() const { return running; }
 
+  // True when begin() gave up because an allocation failed, rather than because
+  // there was no network. The caller cannot tell those apart from isRunning()
+  // alone, and they need different words on screen: one is "the heap is too
+  // fragmented, restart", the other is "you are not connected".
+  bool outOfMemory() const { return oom; }
+
   WsUploadStatus getWsUploadStatus() const;
 
   // Get the port number
@@ -72,6 +78,7 @@ class CrossPointWebServer {
   std::unique_ptr<WebServer> server = nullptr;
   std::unique_ptr<WebSocketsServer> wsServer = nullptr;
   bool running = false;
+  bool oom = false;
   bool watchdogTaskRegistered = false;
   bool apMode = false;  // true when running in AP mode, false for STA mode
   uint16_t port = 80;

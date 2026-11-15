@@ -113,7 +113,12 @@ void CrossPointWebServer::begin() {
   LOG_DBG("WEB", "Network mode: %s", apMode ? "AP" : "STA");
 
   LOG_DBG("WEB", "Creating web server on port %d...", port);
-  server.reset(new WebServer(port));
+  // nothrow: with -fno-exceptions a bare `new` that cannot allocate calls
+  // abort() rather than returning nullptr, so the !server check below -- which
+  // was already written -- could never run. On this device that is not
+  // hypothetical: the heap after a reading session has left well under 4 KB in
+  // one piece. See the station-mode crash in docs-jp/c3-network-crash-procedure.md.
+  server.reset(new (std::nothrow) WebServer(port));
 
   // Disable WiFi sleep to improve responsiveness and prevent 'unreachable' errors.
   // This is critical for reliable web server operation on ESP32.
@@ -129,6 +134,7 @@ void CrossPointWebServer::begin() {
 
   if (!server) {
     LOG_ERR("WEB", "Failed to create WebServer!");
+    oom = true;
     return;
   }
 
@@ -189,18 +195,35 @@ void CrossPointWebServer::begin() {
   // Collect WebDAV headers and register handler
   const char* davHeaders[] = {"Depth", "Destination", "Overwrite", "If", "Lock-Token", "Timeout"};
   server->collectHeaders(davHeaders, 6);
-  server->addHandler(new WebDAVHandler());  // Note: WebDAVHandler will be deleted by WebServer when server is stopped
-  LOG_DBG("WEB", "WebDAV handler initialized");
+  // Note: WebDAVHandler will be deleted by WebServer when server is stopped.
+  // nothrow because a bare new aborts on OOM; losing WebDAV is not worth a
+  // reboot, so the server starts without it and says so.
+  if (auto* davHandler = new (std::nothrow) WebDAVHandler()) {
+    server->addHandler(davHandler);
+    LOG_DBG("WEB", "WebDAV handler initialized");
+  } else {
+    LOG_ERR("WEB", "OOM: WebDAVHandler -- continuing without WebDAV");
+  }
 
   server->begin();
 
   // Start WebSocket server for fast binary uploads
   LOG_DBG("WEB", "Starting WebSocket server on port %d...", wsPort);
-  wsServer.reset(new WebSocketsServer(wsPort));
-  wsInstance = const_cast<CrossPointWebServer*>(this);
-  wsServer->begin();
-  wsServer->onEvent(wsEventCallback);
-  LOG_DBG("WEB", "WebSocket server started");
+  // nothrow, and a failure here is not fatal either: the WebSocket server only
+  // carries the fast binary upload path, so HTTP file transfer still works
+  // without it. Failing the whole server over it would turn a slower upload
+  // into no file transfer at all. handleClient() must therefore tolerate a
+  // null wsServer -- it already null-checks before use.
+  wsServer.reset(new (std::nothrow) WebSocketsServer(wsPort));
+  if (wsServer) {
+    wsInstance = const_cast<CrossPointWebServer*>(this);
+    wsServer->begin();
+    wsServer->onEvent(wsEventCallback);
+    LOG_DBG("WEB", "WebSocket server started");
+  } else {
+    LOG_ERR("WEB", "OOM: WebSocketsServer (%d bytes) -- continuing without fast uploads",
+            (int)sizeof(WebSocketsServer));
+  }
 
   udpActive = udp.begin(LOCAL_UDP_PORT);
   LOG_DBG("WEB", "Discovery UDP %s on port %d", udpActive ? "enabled" : "failed", LOCAL_UDP_PORT);

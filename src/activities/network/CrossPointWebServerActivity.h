@@ -59,6 +59,9 @@ class CrossPointWebServerActivity final : public Activity {
   void onWifiSelectionComplete(bool connected);
   void startAccessPoint();
   void startWebServer();
+  // Show why the server did not start, then return home. `lowMemory` selects
+  // between "restart the device" and a generic failure; see the definition.
+  void reportStartFailure(bool lowMemory);
 
  public:
   explicit CrossPointWebServerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)

@@ -247,10 +247,17 @@ void CrossPointWebServerActivity::startAccessPoint() {
   // Start DNS server for captive portal behavior
   // This redirects all DNS queries to our IP, making any domain typed resolve to us
   stopDnsServer();
-  dnsServer = new DNSServer();
-  dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer->start(DNS_PORT, "*", apIP);
-  LOG_DBG("WEBACT", "DNS server started for captive portal");
+  // nothrow: a bare new aborts on OOM. The captive portal is a convenience --
+  // typing the IP still works without it -- so a failure here is logged and the
+  // hotspot carries on. loop() already guards every use with `dnsServer &&`.
+  dnsServer = new (std::nothrow) DNSServer();
+  if (dnsServer) {
+    dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer->start(DNS_PORT, "*", apIP);
+    LOG_DBG("WEBACT", "DNS server started for captive portal");
+  } else {
+    LOG_ERR("WEBACT", "OOM: DNSServer -- hotspot continues without the captive portal");
+  }
 
   LOG_DBG("WEBACT", "Free heap after AP start: %d bytes", ESP.getFreeHeap());
 
@@ -276,9 +283,20 @@ void CrossPointWebServerActivity::startWebServer() {
   // is the largest block that was available to a 4,096-byte request.
   heapdiag::sample("net-web-before", "needs 280+4096+4096");
 
-  // Create the web server instance
-  webServer.reset(new CrossPointWebServer());
+  // Create the web server instance.
+  //
+  // ★ This is the allocation the station-mode crash died on. It was a bare
+  // `new`, which under -fno-exceptions does not return nullptr on failure -- it
+  // calls abort(), so the device rebooted instead of reporting anything, even
+  // though the isRunning() check below was written to report a failure. nothrow
+  // is what makes that check reachable.
+  webServer.reset(new (std::nothrow) CrossPointWebServer());
   heapdiag::sample("net-web-ctor");
+  if (!webServer) {
+    LOG_ERR("WEBACT", "OOM: CrossPointWebServer (%d bytes + two 4 KB buffers)", (int)sizeof(CrossPointWebServer));
+    reportStartFailure(true);
+    return;
+  }
   webServer->begin();
   heapdiag::sample("net-web-begun");
 
@@ -292,10 +310,32 @@ void CrossPointWebServerActivity::startWebServer() {
     requestUpdate();
   } else {
     LOG_ERR("WEBACT", "ERROR: Failed to start web server!");
+    const bool wasOom = webServer->outOfMemory();
     webServer.reset();
-    // Go back on error
-    onGoHome();
+    reportStartFailure(wasOom);
   }
+}
+
+// What the reader sees when the server does not come up.
+//
+// Before this existed the failure path was `onGoHome()` and nothing else: the
+// screen simply went back to the home list, which is indistinguishable from
+// having pressed Back. For the crash it replaced that was academic -- the
+// device rebooted and never reached here -- but now that the allocation failure
+// is caught, the silent return would be the whole user-visible behaviour.
+//
+// `lowMemory` picks the words, because the two causes need different advice and
+// one of them is easy to get wrong: the heap stays fragmented after a book is
+// closed, so "close the book and try again" would be useless -- by the time the
+// reader is in this menu the book is already closed. Restarting is what
+// actually restores a large contiguous block (measured: 114,676 bytes on a
+// fresh boot against 22,516 after a reading session).
+void CrossPointWebServerActivity::reportStartFailure(const bool lowMemory) {
+  GUI.drawPopup(renderer, lowMemory ? tr(STR_NETWORK_LOW_MEMORY) : tr(STR_ERROR_GENERAL_FAILURE));
+  // The popup draws and displays itself; hold it long enough to be read before
+  // the home screen repaints over it.
+  vTaskDelay(pdMS_TO_TICKS(2500));
+  onGoHome();
 }
 
 void CrossPointWebServerActivity::loop() {

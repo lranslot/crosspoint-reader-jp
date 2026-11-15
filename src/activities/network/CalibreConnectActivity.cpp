@@ -80,13 +80,24 @@ void CalibreConnectActivity::startWebServer() {
     LOG_DBG("CAL", "mDNS started: http://%s.local/", HOSTNAME);
   }
 
-  webServer.reset(new CrossPointWebServer());
+  // nothrow: a bare new here aborts the device on OOM instead of reaching the
+  // ERROR state below. This is the second of the two station-mode entries that
+  // crashed; see docs-jp/c3-network-crash-procedure.md.
+  webServer.reset(new (std::nothrow) CrossPointWebServer());
+  if (!webServer) {
+    LOG_ERR("CAL", "OOM: CrossPointWebServer (%d bytes + two 4 KB buffers)", (int)sizeof(CrossPointWebServer));
+    startOom = true;
+    state = CalibreConnectState::ERROR;
+    requestUpdate();
+    return;
+  }
   webServer->begin();
 
   if (webServer->isRunning()) {
     state = CalibreConnectState::SERVER_RUNNING;
     requestUpdate();
   } else {
+    startOom = webServer->outOfMemory();
     state = CalibreConnectState::ERROR;
     requestUpdate();
   }
@@ -183,6 +194,13 @@ void CalibreConnectActivity::render(RenderLock&&) {
     renderer.drawCenteredText(UI_12_FONT_ID, top, tr(STR_CALIBRE_STARTING));
   } else if (state == CalibreConnectState::ERROR) {
     renderer.drawCenteredText(UI_12_FONT_ID, top, tr(STR_CONNECTION_FAILED), true, EpdFontFamily::BOLD);
+    // "Connection failed" is the wrong account when the Wi-Fi joined fine and
+    // it was the allocation that failed, so the reason goes underneath rather
+    // than replacing a heading other failures still need.
+    if (startOom) {
+      renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing * 2,
+                                tr(STR_NETWORK_LOW_MEMORY));
+    }
   } else if (state == CalibreConnectState::SERVER_RUNNING) {
     GUI.drawSubHeader(renderer, Rect{0, metrics.topPadding + metrics.headerHeight, pageWidth, metrics.tabBarHeight},
                       connectedSSID.c_str(), (std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP).c_str());

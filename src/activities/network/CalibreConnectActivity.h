@@ -27,6 +27,9 @@ class CalibreConnectActivity final : public Activity {
   unsigned long lastCompleteAt = 0;
   unsigned long lastProcessedCompleteAt = 0;  // Track which server value we've already processed
   bool exitRequested = false;
+  // True when the ERROR state was reached because an allocation failed rather
+  // than because the network did not come up; changes what the screen says.
+  bool startOom = false;
 
   void renderServerRunning() const;
 
