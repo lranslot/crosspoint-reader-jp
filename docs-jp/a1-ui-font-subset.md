@@ -10,7 +10,10 @@
 
 | 問い | 答え |
 |---|---|
-| UI に必要な非 ASCII 文字は何字か | **349字** (漢字230・ひらがな45・カタカナ61・和文約物9・その他4) |
+| UI に必要な非 ASCII 文字は何字か | ★ **352字 (2026-11-15)** ── 漢字232 ほか。**349 → 351 → 352** と、この日のうちに 2 回動いた。+2 はルビ・傍点・禁則・5ページ送り・同一判定の文言、**さらに +1 は同じ日に「やめる／書き込む」を足した分**である。★ **文言を 1 本直すだけで集合が動く**という §8.6-1 の警告がそのまま出た実例。`python scripts/gen_ui_charset.py` で**焼く直前に**測り直すこと |
+| 焼き込む面の名前 | ★ **`CPGothic UI JP`** ── 下の §0.9 |
+| ★ 焼き込む形式 | **`.cpfont` ではない。**`fontconvert.py` が吐く **C ヘッダ**（`builtinFonts/*.h`）── 下の §0.8 |
+| ★ 6 サイズ全部入るか | **入る。169,379 B ＝ Flash の空き 895,555 B の 18.9%**（実測。下の §0.8） |
 | 焼き込むと何バイトか | **112 KB** (無圧縮) / **81 KB** (DEFLATE) |
 | 使える容量はどれだけか | **約 1,233 KB** (現在の空き 910 KB + 30言語削除で 323 KB) |
 | 足りるか | **大幅に足りる。使用率 9%。** |
@@ -141,6 +144,102 @@ Wi-Fi の SSID 一覧 / フォント一覧 / 設定項目。
 > 配布先の構成を前提にできない (仕様書 §3.6)。
 
 ---
+
+## 0.8 ★ 訂正と実測 (2026-11-15) — 焼き込むのは `.cpfont` ではない
+
+> **ここは思い違いをしていた。**焼き込む面を `.cpfont` だと書いて／思って
+> 進めていたが、**`.cpfont` は SD カード用**である。
+> **焼き込みは `fontconvert.py` が吐く C ヘッダ**（`lib/EpdFont/builtinFonts/*.h`）で、
+> それがそのまま Flash の定数になる。
+>
+> | | ツール | 出力 | 部分集合 |
+> |---|---|---|---|
+> | **焼き込み** | `lib/EpdFont/scripts/fontconvert.py` | **`.h`** | ★ `--additional-intervals` で**できる** |
+> | SD 用 | `fontconvert_sdcard.py` | `.cpfont` | **できない**（`--intervals <preset>` 単位） |
+>
+> だから「利用者が自分で作る 6 サイズ」は全 CJK（27.5 MB）で、
+> 「焼き込む 6 サイズ」は 351 字しか持たない ── **別物である。**
+
+### 実測 (2026-11-15)
+
+UDEVGothic v2.0.0 の TTF から、出荷の `fontconvert.py` の基底区間を ASCII だけに
+絞った写しで、**351 字 + ASCII 95** を `--2bit --compress --pnum` で生成し、
+**データバイトを数えた。**
+
+> ★ **下の数字は 351 字のときのもの**である。同じ日に文言を 1 本直して
+> **352 字**になったが、**測り直していない。**1 字ぶん（数十バイト）増える
+> だけで結論（6 サイズで 18.9%）は動かないが、**測った数字と現在の字数が
+> 1 字ずれていることは書いておく** ── 焼く直前に測り直すのが正しい。
+
+| pt | バイト数 |
+|---|---|
+| 8 | **16,243** |
+| 10 | **20,826** |
+| 12 | **25,376** |
+| 14 | **30,460** |
+| 16 | **35,186** |
+| 18 | **41,288** |
+
+| | 合計 | Flash の空き 895,555 B に対して |
+|---|---|---|
+| 3 サイズ（8/10/12） | 62,445 B | **7.0%** |
+| ★ **6 サイズ全部** | **169,379 B** | **18.9%** |
+
+★ **外挿していない。6 サイズすべて生成した**（§8.8-13「外挿してはならない」）。
+生成は 1 サイズ **0.4 秒**。
+
+→ **「3 サイズだけ」という制約は不要だった。**#12 の「6 サイズ必須」は
+焼き込みでも満たせる。
+
+## 0.9 ★ 焼き込む面の名前 — `CPGothic UI JP` (2026-11-15 確定)
+
+UDEV Gothic は **Reserved Font Name** を持つ:
+
+> `Copyright (c) 2022 Yuko OTAWARA. with Reserved Font Name "UDEV Gothic"`
+
+OFL 1.1 第 3 条:
+
+> 3) No Modified Version of the Font Software may use the Reserved Font Name(s)
+> unless explicit written permission is granted by the corresponding Copyright
+> Holder. **This restriction only applies to the primary font name as presented
+> to the users.**
+
+**部分集合は Modified Version に当たる** ──
+
+> "it is not possible to preserve FE, and so pre-subsetting needs to be
+> considered a Modified Version for which RFN restrictions apply."
+> ── <https://openfontlicense.org/webfonts-and-reserved-font-names/>
+
+### 名前を `CPGothic UI JP` にした理由
+
+| | |
+|---|---|
+| **UDEV Gothic を含まない** | 第 3 条を満たす |
+| ★ **`UDEV` の語を持ち込んでいない** | 公式の手引きが**「元の名前と文字の並びが似た名前・似た響きの名前を避けよ」**としている ── "be creative and avoid names that reuse almost all the same letters in the same order or sound like the original"（<https://openfontlicense.org/how-to-modify-ofl-fonts/>） |
+| `CP` で**来歴**、`UI` で**用途**、`JP` で**対象** | 名前だけで何の面かが分かる |
+| `Gothic` は書体分類の一般語 | ゴシック体の総称であり、RFN が掛かるのは**「利用者に見える主たるフォント名」= `UDEV Gothic`** である |
+
+★ **来歴は名前ではなく、同梱する文書に書く**（手引きが求めている形）:
+`dist/licenses/FONTLOG.txt`（由来・改名の理由・謝辞）と**3 件の著作権表示**、
+および README の「本文用に UDEVGothic を推奨」の案内。
+
+参考: <https://openfontlicense.org/ofl-reserved-font-names/>
+
+### 同梱するもの
+
+`dist/licenses/` に用意済み ── `OFL-1.1.txt`（Yuko OTAWARA の表示と RFN を含む本文）
+と `FONTLOG.txt`。
+
+★ **配布 zip にライセンス文書が入っていない。**`UDEVGothic_v2.0.0.zip` は
+**TTF 25 本だけ**で、LICENSE が 1 つもない。OFL 第 2 条は複製に著作権表示と
+ライセンス本文の同梱を求めるので、**再配布する側がリポジトリから取って同梱する。**
+
+### ★ 本文用の SD フォントは改名しなくてよい
+
+| | 改名 | 理由 |
+|---|---|---|
+| 焼き込む UI の面（351 字 × 6 サイズ） | ★ **必要** | 部分集合 = Modified Version を**我々が配布する** |
+| 本文用の SD フォント（全 CJK 6 サイズ） | **不要** | **無改変**で、**利用者が自分で入れる**（＝我々の配布に当たらない） |
 
 ## 1. 対象となるフォント面 — **5面**
 

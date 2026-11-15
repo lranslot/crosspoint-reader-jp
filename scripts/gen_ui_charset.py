@@ -9,6 +9,21 @@ japanese.yaml を編集するたびに文字集合は変わる。翻訳を 1 つ
 焼き込む字が増えるため (「推定」の「推」がそうだった — 仕様書 §8.6-1)、
 Phase B ではこれをビルド時に走らせるのが確実。
 
+★ 焼き込む面の名前は **CPGothic UI JP**。`fontconvert.py --name` に渡す。
+
+  UDEV Gothic は Reserved Font Name を持ち、**部分集合は Modified Version** なので
+  OFL 1.1 第 3 条により RFN を主たるフォント名に使えない
+  (https://openfontlicense.org/webfonts-and-reserved-font-names/)。
+  名前に `UDEV` の語を入れてもいけない ── 手引きが「元の名前と文字の並びが
+  似た名前・似た響きの名前を避けよ」としている
+  (https://openfontlicense.org/how-to-modify-ofl-fonts/)。
+  来歴は名前ではなく dist/licenses/FONTLOG.txt と著作権表示 3 件に書く。
+
+★ 焼き込むのは .cpfont ではない。fontconvert.py が吐く C ヘッダである
+  (.cpfont は SD カード用で、部分集合を作れない)。実測は
+  docs-jp/a1-ui-font-subset.md §0.8 ── 351 字 x 6 サイズで 169,379 B、
+  Flash の空き 895,555 B の 18.9% で全部入る。
+
 使い方:
   python scripts/gen_ui_charset.py              # 内訳を表示
   python scripts/gen_ui_charset.py --intervals  # fontconvert.py 用の引数を出力

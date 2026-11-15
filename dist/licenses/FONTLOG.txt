@@ -1,0 +1,108 @@
+FONTLOG for CPGothic UI JP
+==========================
+
+This file provides detailed information on the CPGothic UI JP font software.
+This information should be distributed along with the CPGothic UI JP fonts and
+any derivative works.
+
+
+Basic Font Information
+----------------------
+
+CPGothic UI JP is the user-interface typeface compiled into the CrossPoint
+Reader Japanese firmware for the Xteink X4. It is a subset of UDEV Gothic,
+containing only the characters the firmware's own fixed interface strings need
+-- 351 non-ASCII characters plus ASCII -- rasterised at six point sizes
+(8, 10, 12, 14, 16, 18) into the firmware image itself.
+
+It is **not** a general-purpose font. It cannot render a book, a filename or an
+author's name, and it is not installable on a computer. Body text on the device
+is drawn from a font the reader installs on the SD card; UDEV Gothic itself is
+what we recommend there, unmodified and under its own name.
+
+UDEV Gothic was chosen because it is a universal-design face: `l` and `I`, `O`
+and `0` are distinguishable, which matters on a 480x800 electrophoretic panel
+at 8 pt.
+
+
+Why the name changed
+--------------------
+
+UDEV Gothic carries a Reserved Font Name. A subset is a Modified Version, so
+the Reserved Font Name may not be used for it:
+
+  "it is not possible to preserve FE, and so pre-subsetting needs to be
+   considered a Modified Version for which RFN restrictions apply."
+  -- https://openfontlicense.org/webfonts-and-reserved-font-names/
+
+  "be creative and avoid names that reuse almost all the same letters in the
+   same order or sound like the original. It will help everyone if Original
+   Versions and Modified Versions can easily be distinguished from one another
+   and from other derivatives."
+  -- https://openfontlicense.org/how-to-modify-ofl-fonts/
+
+"CPGothic UI JP" carries no part of "UDEV", and does not sound like it. CP is
+the firmware, UI is what the font is for, JP is the language it covers.
+"Gothic" is the ordinary classification term for a sans-serif Japanese face
+(ゴシック体), used across the family of such fonts; the name the OFL reserves
+is the primary font name presented to users, which is "UDEV Gothic".
+
+Provenance is recorded here and in the copyright notices rather than in the
+name, which is what the guidance asks for.
+
+
+Acknowledgements
+----------------
+
+(No acknowledgement is required by the licence. It is offered because these
+fonts are the work of other people.)
+
+CPGothic UI JP is a subset of UDEV Gothic by Yuko OTAWARA, which is itself a
+composition of two faces:
+
+  BIZ UDGothic   -- the Japanese characters. A universal-design face by
+                    Morisawa, released by the BIZ UDGothic Project Authors.
+  JetBrains Mono -- the Latin letters and digits, by JetBrains.
+
+Our thanks to all three.
+
+
+Copyright notices
+-----------------
+
+Copyright (c) 2022 Yuko OTAWARA. with Reserved Font Name "UDEV Gothic"
+Copyright 2022 The BIZ UDGothic Project Authors
+  (https://github.com/googlefonts/morisawa-biz-ud-gothic)
+Copyright 2020 The JetBrains Mono Project Authors
+  (https://github.com/JetBrains/JetBrainsMono)
+
+All three are licensed under the SIL Open Font License, Version 1.1, whose text
+accompanies this file as OFL-1.1.txt.
+
+Note for redistributors: the UDEV Gothic release archive contains the TTF files
+only -- no licence text. OFL clause 2 requires the copyright notice and the
+licence to travel with every copy, so the text has to be taken from the project
+repository and bundled, as it is here.
+
+
+ChangeLog
+---------
+
+<date of release>  CPGothic UI JP  (CrossPoint Reader JP)
+- Subset of UDEV Gothic Regular v2.0.0 to the 351 non-ASCII characters used by
+  the firmware's fixed interface strings, plus ASCII.
+- Rasterised to 2-bit bitmaps at 8, 10, 12, 14, 16 and 18 pt and compiled into
+  the firmware image. No outlines are redistributed.
+- Renamed, for the reason given above.
+
+
+Information for Contributors
+----------------------------
+
+CPGothic UI JP is generated, not edited: see scripts/gen_ui_charset.py for the
+character set and lib/EpdFont/scripts/fontconvert.py for the rasteriser. To
+change which characters it holds, change the interface strings in
+lib/I18n/translations/japanese.yaml and regenerate.
+
+UDEV Gothic is at https://github.com/yuru7/udev-gothic and is the place to
+contribute to the outlines.

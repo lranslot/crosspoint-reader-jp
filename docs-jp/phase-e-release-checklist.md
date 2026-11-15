@@ -41,7 +41,14 @@ Phase E に着手するとき、手順書を書く前にこの一覧を上から
 
 ### ★ #12 が必須である理由 — 焼き込みは SD を不要にしない
 
-**焼き込む 349 字は UI の固定文言だけである。**
+★ **2026-11-15 追記 — 「3 サイズだけ」という制約は不要だった。**
+焼き込みで **6 サイズ全部入る**（351 字 × 8/10/12/14/16/18 pt = **169,379 B**、
+Flash の空き 895,555 B の **18.9%**。外挿ではなく全サイズ生成した実測）。
+よって #12 の「6 サイズすべて」は**焼き込み側でも満たせる** ── ただし
+下の理由（任意の文字は SD のフォントが描く）は変わらないので、
+**#12 そのものは残す。**→ [a1-ui-font-subset.md §0.8](a1-ui-font-subset.md)
+
+**焼き込む 351 字は UI の固定文言だけである。**
 ファイル名・書名・著者名・章題・SSID のような**予測できない文字は
 焼き込めないので、SD のフォントが描き続ける。**
 
@@ -127,17 +134,30 @@ Phase E に着手するとき、手順書を書く前にこの一覧を上から
 
 MIT (上流を継承)。**動作保証を行わない旨を明記する。**
 
-> **⚠️ 焼き込むフォントのライセンスを確認すること。**
-> OFL の Modified Version には「フォーマットの変更、あるいは新しい環境への移植」が
-> 含まれる。TTF → `.cpfont` の変換はこれに該当し、**ファームウェアバイナリに
-> フォントデータが入るなら「再配布」である。**
->
-> - ライセンス表示の同梱が必要
-> - **RFN (Reserved Font Name) のあるフォントは改名が必要**
->   (UDEV Gothic は RFN あり。派生元の BIZ UDゴシック / JetBrains Mono 分の
->   著作権表示も要る)
->
-> 詳細は仕様書 附録C。**Phase B でフォントを選ぶ時点で確認する。**
+★ **確認した (2026-11-15)。条文を当たって確定した結論は 2 点だけである。**
+
+| やること | 根拠 |
+|---|---|
+| **1. 焼き込む面の名前を `CPGothic UI JP` にする** | UDEV Gothic は RFN あり（`with Reserved Font Name "UDEV Gothic"`）。**部分集合は Modified Version** ── "pre-subsetting needs to be considered a Modified Version for which RFN restrictions apply"（<https://openfontlicense.org/webfonts-and-reserved-font-names/>）。OFL 第 3 条が掛かるのは「利用者に見える主たるフォント名」 |
+| **2. OFL 1.1 本文と 3 件の著作権表示を同梱する** | OFL 第 2 条。★ **UDEV Gothic の配布 zip には TTF 25 本しか入っておらず LICENSE が無い**ので、リポジトリから取って同梱する |
+
+同梱物は **`dist/licenses/`** に用意済み（`OFL-1.1.txt` / `FONTLOG.txt`）。
+著作権表示は 3 件:
+
+    Copyright (c) 2022 Yuko OTAWARA. with Reserved Font Name "UDEV Gothic"
+    Copyright 2022 The BIZ UDGothic Project Authors
+    Copyright 2020 The JetBrains Mono Project Authors
+
+★ **名前に `UDEV` を入れてはいけない。**公式の手引きが
+"avoid names that reuse almost all the same letters in the same order or sound
+like the original"（<https://openfontlicense.org/how-to-modify-ofl-fonts/>）と
+しているため。**来歴は名前ではなく FONTLOG と著作権表示に書く。**
+
+★ **本文用の SD フォントは改名不要。**無改変で、**利用者が自分で入れる**ので
+我々の配布に当たらない ── UDEVGothic をその名前のまま推奨してよい。
+
+詳細と実測は [a1-ui-font-subset.md §0.8 / §0.9](a1-ui-font-subset.md)、
+同梱物の作り方は [`dist/licenses/README.md`](../dist/licenses/README.md)。
 
 ---
 
@@ -146,4 +166,4 @@ MIT (上流を継承)。**動作保証を行わない旨を明記する。**
 | 版数 | 日付 | 内容 |
 |---|---|---|
 | v0.1 | 2026-10-21 | 旧仕様書 v0.7 §10.3 / §10.1 / §10.2 / §10.4 から分離して独立文書化 |
-| v0.2 | 2026-10-27 | **必須項目を 11 → 12 に。**#12「フォントは 8/10/12/14/16/18 の 6 サイズすべてを生成すること」を追加。**焼き込み (Phase B) は SD を不要にしない**ことを明記 — 焼き込む 349 字は UI の固定文言だけで、ファイル名・書名・著者名・章題・SSID は SD のフォントが描き続ける。**8 pt が欠けたときに豆腐になる 6 箇所**を症状から原因を当てられる形で記載。#5 の文面を「無くても UI は日本語」から「無くても設定画面は操作できるが、書名・ファイル名は読めない」に訂正 |
+| v0.2 | 2026-10-27 | **必須項目を 11 → 12 に。**#12「フォントは 8/10/12/14/16/18 の 6 サイズすべてを生成すること」を追加。**焼き込み (Phase B) は SD を不要にしない**ことを明記 — 焼き込む 351 字は UI の固定文言だけで、ファイル名・書名・著者名・章題・SSID は SD のフォントが描き続ける。**8 pt が欠けたときに豆腐になる 6 箇所**を症状から原因を当てられる形で記載。#5 の文面を「無くても UI は日本語」から「無くても設定画面は操作できるが、書名・ファイル名は読めない」に訂正 |
