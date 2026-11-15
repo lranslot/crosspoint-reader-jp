@@ -38,6 +38,10 @@ class SdCardFontSystem {
   /// now leaves standing instead of erasing.
   const char* loadedFamilyName() const { return manager_.currentFamilyName().c_str(); }
 
+  /// Return the loaded fonts' caches to the heap without unloading them.
+  /// See SdCardFontManager::releaseCaches(). Returns the number of fonts touched.
+  int releaseFontCaches(bool includePersistent) { return manager_.releaseCaches(includePersistent); }
+
   /// Mark the registry as needing re-discovery.
   /// Thread-safe: can be called from the web server task.
   void markRegistryDirty() { registryDirty_.store(true, std::memory_order_release); }

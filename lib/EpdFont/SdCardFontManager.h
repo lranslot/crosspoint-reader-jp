@@ -32,6 +32,18 @@ class SdCardFontManager {
   // Unload everything, unregister from renderer.
   void unloadAll(GfxRenderer& renderer);
 
+  // Return the caches of every loaded font to the heap, keeping the fonts
+  // loaded and usable. Measurement instrument first, reclaim second: what gets
+  // dropped here is exactly what a reading session scatters across the heap --
+  // the on-demand glyph bitmaps (128 separate new[] blocks, one per glyph) and,
+  // with `includePersistent`, the per-style advance tables (up to 768 entries
+  // x 8 bytes x 4 styles), which clearCache() deliberately preserves so that
+  // re-indexing the same book does not re-read the card.
+  //
+  // Returns the number of fonts touched. Anything dropped here is re-read from
+  // the SD card on next use, so the cost is I/O on the next page, not a reload.
+  int releaseCaches(bool includePersistent);
+
   // Look up the font ID for the loaded family. Returns 0 if nothing loaded
   // or familyName doesn't match.
   int getFontId(const std::string& familyName) const;

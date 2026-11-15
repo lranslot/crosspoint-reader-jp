@@ -140,12 +140,57 @@ void TxtReaderActivity::onExit() {
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
 
-  pageOffsets.clear();
-  currentPageLines.clear();
-  offsetHistory.clear();
+  // --- Staged teardown, measured one release at a time ---
+  //
+  // Why staged: the "reader-exit" sample above is taken before anything is
+  // released, so the largest-block figure it reports (22,516 B on this device
+  // after a Japanese book) is not what the heap looks like once reading is
+  // over -- it is what reading left standing. Entering the network from there
+  // aborts, and which of these holders is responsible cannot be read off a
+  // single number. Each stage below releases exactly one thing and samples
+  // immediately after it, so the recovery attributable to that one holder is
+  // the difference between two adjacent lines of /heap.txt.
+  //
+  // ★ This is a measurement, and measuring here means performing the releases.
+  // The cost is paid on the next entry to the reader, which re-reads the glyph
+  // bitmaps and advance entries it needs from the card.
+
+  // (1) The page arrays. clear() destroys elements but keeps capacity, so the
+  // buffers are handed back only by swapping against an empty vector. Without
+  // this they would survive to the activity's own destruction a moment later;
+  // the point is to see the figure attributable to them alone.
+  char detail[96];
+  snprintf(detail, sizeof(detail), "cap off=%u lines=%u hist=%u", (unsigned)pageOffsets.capacity(),
+           (unsigned)currentPageLines.capacity(), (unsigned)offsetHistory.capacity());
+  // Note on currentPageLines: it is a vector<std::string>, so one page of text
+  // is itself one small heap block per visual line, freed as the elements are
+  // destroyed. The swap returns the array of handles on top of that.
+  std::vector<size_t>().swap(pageOffsets);
+  std::vector<std::string>().swap(currentPageLines);
+  std::vector<LineAttr>().swap(currentPageAttrs);
+  std::vector<size_t>().swap(offsetHistory);
+  heapdiag::sample("reader-exit-pages", detail);
+
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
+
+  // (2) The book: index, content buffer and open file handle.
   txt.reset();
+  heapdiag::sample("reader-exit-book");
+
+  // (3) The on-demand glyph bitmaps: 128 separate new[] blocks, one per glyph,
+  // held by the font object -- which is global and therefore outlives this
+  // activity entirely. This is the suspected scatter.
+  const int glyphFonts = sdFontSystem.releaseFontCaches(false);
+  snprintf(detail, sizeof(detail), "fonts=%d", glyphFonts);
+  heapdiag::sample("reader-exit-glyph", detail);
+
+  // (4) The per-style advance tables, which clearCache() deliberately keeps:
+  // up to 768 entries x 8 bytes x 4 styles per loaded font, allocated during
+  // indexing and never returned until the font is unloaded.
+  const int advFonts = sdFontSystem.releaseFontCaches(true);
+  snprintf(detail, sizeof(detail), "fonts=%d", advFonts);
+  heapdiag::sample("reader-exit-advance", detail);
 }
 
 void TxtReaderActivity::loop() {

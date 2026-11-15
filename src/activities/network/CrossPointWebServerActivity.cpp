@@ -176,8 +176,15 @@ void CrossPointWebServerActivity::onWifiSelectionComplete(const bool connected) 
     // Get connection info before exiting subactivity
     isApMode = false;
 
+    // Joining is the station path's largest consumer -- the DHCP client, the
+    // lwIP buffer pools and the TCP state all come up here -- and nothing was
+    // measured after it. Two samples: one with the join paid for, one after
+    // mDNS, so the two are not confused with each other.
+    heapdiag::sample("net-joined");
+
     // Start mDNS for hostname resolution
     restartMdns(AP_HOSTNAME, "WEBACT");
+    heapdiag::sample("net-mdns");
 
     // Start the web server
     startWebServer();
@@ -254,9 +261,26 @@ void CrossPointWebServerActivity::startAccessPoint() {
 void CrossPointWebServerActivity::startWebServer() {
   LOG_DBG("WEBACT", "Starting web server...");
 
+  // ★ The sample that was missing. The station crash reaches exactly this far:
+  // "Starting web server..." is the last line in the log, and begin()'s own
+  // first line ("Creating web server on port %d") never appears -- so the abort
+  // happens in the construction below, not inside begin().
+  //
+  // Constructing CrossPointWebServer asks the heap for three blocks, measured
+  // against this build: the object itself at 280 bytes, then 4,096 for
+  // upload.buffer and 4,096 for fontUpload.buffer, both resized by their
+  // members' constructors. The last reading before this point was taken before
+  // the network was joined, and joining is itself the largest consumer on the
+  // path, so there was no figure at all for the moment that matters. If the
+  // device aborts here, this line is the last one in /heap.txt and its `max`
+  // is the largest block that was available to a 4,096-byte request.
+  heapdiag::sample("net-web-before", "needs 280+4096+4096");
+
   // Create the web server instance
   webServer.reset(new CrossPointWebServer());
+  heapdiag::sample("net-web-ctor");
   webServer->begin();
+  heapdiag::sample("net-web-begun");
 
   if (webServer->isRunning()) {
     state = WebServerActivityState::SERVER_RUNNING;
