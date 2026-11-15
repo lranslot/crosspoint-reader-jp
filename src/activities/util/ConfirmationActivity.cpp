@@ -6,8 +6,13 @@
 #include "components/UITheme.h"
 
 ConfirmationActivity::ConfirmationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                           const std::string& heading, const std::string& body)
-    : Activity("Confirmation", renderer, mappedInput), heading(heading), body(body) {}
+                                           const std::string& heading, const std::string& body, const char* cancelLabel,
+                                           const char* confirmLabel)
+    : Activity("Confirmation", renderer, mappedInput),
+      heading(heading),
+      body(body),
+      cancelLabel_(cancelLabel),
+      confirmLabel_(confirmLabel) {}
 
 void ConfirmationActivity::onEnter() {
   Activity::onEnter();
@@ -26,7 +31,8 @@ void ConfirmationActivity::onEnter() {
   // (centered) doesn't cover it.
   startY = renderer.getScreenHeight() / 6;
 
-  const char* options[] = {I18N.get(StrId::STR_CANCEL), I18N.get(StrId::STR_CONFIRM)};
+  const char* options[] = {cancelLabel_ != nullptr ? cancelLabel_ : I18N.get(StrId::STR_CANCEL),
+                           confirmLabel_ != nullptr ? confirmLabel_ : I18N.get(StrId::STR_CONFIRM)};
   confirmPopup.show(safeHeading.c_str(), options, 2, 0, [this](int idx) {
     ActivityResult res;
     res.isCancelled = (idx != 1);

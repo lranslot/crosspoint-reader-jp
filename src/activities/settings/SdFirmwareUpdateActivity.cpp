@@ -129,12 +129,17 @@ void SdFirmwareUpdateActivity::promptConfirmation() {
   // person can check by eye. Only when the answer is certain: Unknown keeps the
   // ordinary prompt, because the one thing this must not do is stand between
   // the device and an update.
-  if (firmware_flash::sameAsRunning(firmwarePath.c_str()) == firmware_identity::Verdict::Same) {
+  const bool sameAsRunning = firmware_flash::sameAsRunning(firmwarePath.c_str()) == firmware_identity::Verdict::Same;
+  if (sameAsRunning) {
+    // The screen behind the popup already states the fact and shows the version.
+    // The box asks the question -- a declaration with Cancel/Confirm under it is
+    // not a question, and the reader has to guess which button writes.
     heading = tr(STR_FIRMWARE_SAME_PROMPT);
     body = firmware_flash::runningVersionString();
   }
 
-  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body),
+  startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, body,
+                                                                tr(STR_FIRMWARE_WRITE_NO), tr(STR_FIRMWARE_WRITE_YES)),
                          [this](const ActivityResult& result) { onConfirmationResult(result); });
 }
 
