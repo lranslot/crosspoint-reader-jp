@@ -47,7 +47,7 @@ constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
 // from an estimate, which moves rubyPitch and so moves where pages break.
 // 10: an indent is a line attribute and spends cells out of the line's budget.
 // 11: a line carrying emphasis dots reserves a band for them (A7).
-constexpr uint8_t CACHE_VERSION = 13;
+constexpr uint8_t CACHE_VERSION = 14;
 
 // --- A7: the emphasis marks, cut by hand ---
 //
@@ -625,7 +625,42 @@ void TxtReaderActivity::initializeReader() {
   rubyFontId = sdFontSystem.loadRubyFont(renderer, SETTINGS.fontPointSize);
   rubyEm = rubyFontId ? renderer.getFullWidthAdvance(rubyFontId) : 0;
   if (rubyEm < 1) rubyEm = 0;
-  rubyPitch = rubyEm > 0 ? std::max(normalPitch, cellSize + rubyEm + 1) : normalPitch;
+  // ★ One rule for both marks, and no max(): the band is the ordinary pitch plus
+  // the mark's own strip.
+  //
+  //   band = normalPitch + (strip + 1)
+  //     top     the strip      (rubyEm + 1 / boutenDot + 1)
+  //     middle  the base text  (cellSize)
+  //     bottom  the leading    (normalPitch - cellSize)
+  //
+  // What was here before was max(normalPitch, cellSize + strip + 1), and the
+  // right-hand side is *text plus strip with no leading at all*. max() only
+  // guaranteed the band was no shorter than an ordinary line's pitch; stacking
+  // the strip above the text inside it then left 0 to 3 px of white below,
+  // against the 1 to 21 px an ordinary line keeps -- at every one of the six
+  // point sizes and all three spacings. So the mark was always eating the
+  // leading, taken from above, and on the device the ruby bit into the line
+  // over it. "A generous line spacing absorbs the ruby for free" (f8-ruby.md
+  // 2.5) was true of the band's height and never of its white space.
+  //
+  // Vertical never had the fault because a column is handed a band of its own
+  // full width and `used += pitch` moves past all of it, so a band never
+  // borrows from its neighbour. This is that same shape, in the other axis.
+  //
+  // ★ One rule per mark, but the composition differs by axis, because the strip
+  // is in a different place in each:
+  //
+  //   horizontal   the strip is stacked ABOVE the text, so the band has to hold
+  //                text + leading + strip   =  normalPitch + strip + 1
+  //   vertical     the strip sits BESIDE the cell inside the band, and the band
+  //                already carries its leading as (columnWidth - cellSize), so
+  //                max(columnWidth, cellSize + strip + 1) is right and always was
+  //
+  // Using the horizontal form in both would widen every vertical ruby column by
+  // 2 to 18 px depending on size and spacing -- over-reserving in the one axis
+  // that was never wrong, and moving vertical page boundaries for no gain.
+  rubyPitch =
+      rubyEm > 0 ? (isVertical ? std::max(normalPitch, cellSize + rubyEm + 1) : normalPitch + rubyEm + 1) : normalPitch;
 
   // A7. A quarter of the em, which is the largest mark that still disappears
   // into the ordinary line spacing: cellSize + cellSize/4 + 1 comes to 32/37/42/48
@@ -635,7 +670,11 @@ void TxtReaderActivity::initializeReader() {
   // here — the marks are drawn from a table, so this works on a card with no
   // Japanese family at all, unlike ruby.
   boutenDot = std::max(BOUTEN_MIN_SIZE, std::min(BOUTEN_MAX_SIZE, cellSize / 4));
-  boutenPitch = std::max(normalPitch, cellSize + boutenDot + 1);
+  // The same rule, deliberately not special-cased. From 14 pt up the old max()
+  // happened to leave 3 to 11 px below, which is enough for a 7 to 9 px dot --
+  // but 8, 10 and 12 pt left 0, and a rule with a size threshold in it is a
+  // rule that will be wrong again the next time a font changes.
+  boutenPitch = isVertical ? std::max(normalPitch, cellSize + boutenDot + 1) : normalPitch + boutenDot + 1;
   // Only an Aozora .txt can carry ruby. Everything else keeps a constant pitch,
   // which is the same arithmetic the line count used to be.
   if (!aozoraMarkup || isMarkdown) {
@@ -1772,8 +1811,8 @@ void TxtReaderActivity::render(RenderLock&&) {
         line, sizeof(line),
         "%lu p%d vert=%d n=%d asm=%lu draw=%lu adv=%lu glyph=%lu "
         "heap=%lu->%lu max=%lu min=%lu lines=%u\n",
-        static_cast<unsigned long>(millis()),
-        currentPage + 1, isVertical ? 1 : 0, PageBudget(pageExtent, normalPitch).linesAtFloor(), assembleMs, drawMs,
+        static_cast<unsigned long>(millis()), currentPage + 1, isVertical ? 1 : 0,
+        PageBudget(pageExtent, normalPitch).linesAtFloor(), assembleMs, drawMs,
         static_cast<unsigned long>(SdCardFont::advanceLookups() - advanceBefore),
         static_cast<unsigned long>(SdCardFont::glyphLoads() - glyphBefore), static_cast<unsigned long>(heapBefore),
         static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()),
@@ -1828,9 +1867,13 @@ void TxtReaderActivity::renderPage() {
     int y = cachedOrientedMarginTop;
     int lineIndex = 0;
     for (const auto& line : currentPageLines) {
-      // The ruby strip sits above the base line, so the extra height a ruby line
-      // was given is skipped before the text and not after it. With no ruby on
-      // the line this adds nothing and y walks by lineHeight exactly as before.
+      // y names the top of this line's band. The band is the ordinary pitch plus
+      // the mark's strip, so stepping in by (pitch - normalPitch) puts the base
+      // text where it belongs and leaves the strip the space above it -- and the
+      // leading below the text is the band's own, not borrowed from the line
+      // over it. With no mark on the line pitch == normalPitch and this adds
+      // nothing, so a page with no ruby and no dots is laid out exactly as it
+      // was. See the band rule in initializeReader().
       const LineAttr attr =
           lineIndex < static_cast<int>(currentPageAttrs.size()) ? currentPageAttrs[lineIndex] : LineAttr{};
       const int pitch = pitchOf(attr);
@@ -1888,6 +1931,10 @@ void TxtReaderActivity::renderPage() {
         if (attr.rubyCount && rubyFontId) drawRubyHorizontal(line, attr, x, y);
         if (attr.boutenCount) drawBoutenHorizontal(line, attr, x, y);
       }
+      // The band's remainder: its own leading, which is what keeps the next line
+      // off this one's strip. Together with the step-in above this advances by
+      // exactly `pitch`, which is what PageBudget charged for the line -- the
+      // drawing and the budget spend the same number by construction.
       y += normalPitch;
       lineIndex++;
     }

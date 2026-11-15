@@ -7,28 +7,30 @@
 # are a baseline for comparison between revisions, not a prediction of the
 # device's page numbers.
 #
-# Recorded at 38af4c6e plus the working tree of the indent-carry change.
-f8test_sjis.txt              narrow  pages=42     carrylost=0    hash=42e3ec62d8129a80
-f8test_sjis.txt              normal  pages=48     carrylost=0    hash=80a9db2cd6603cec
-f8test_sjis.txt              wide    pages=52     carrylost=0    hash=a675e7ed49a099d8
-f8test_utf8.txt              narrow  pages=42     carrylost=0    hash=42e3ec62d8129a80
-f8test_utf8.txt              normal  pages=48     carrylost=0    hash=80a9db2cd6603cec
-f8test_utf8.txt              wide    pages=52     carrylost=0    hash=a675e7ed49a099d8
-saishu_sensoron_sjis.txt     narrow  pages=166    carrylost=0    hash=03f72f4120551867
-saishu_sensoron_sjis.txt     normal  pages=193    carrylost=0    hash=6103b9522e84df0a
-saishu_sensoron_sjis.txt     wide    pages=211    carrylost=0    hash=cafade488716149c
-saishu_sensoron_utf8.txt     narrow  pages=166    carrylost=0    hash=03f72f4120551867
-saishu_sensoron_utf8.txt     normal  pages=193    carrylost=0    hash=6103b9522e84df0a
-saishu_sensoron_utf8.txt     wide    pages=211    carrylost=0    hash=cafade488716149c
-sensoshi_taikan_sjis.txt     narrow  pages=324    carrylost=0    hash=2bd9c8fd59c5ea73
-sensoshi_taikan_sjis.txt     normal  pages=378    carrylost=0    hash=c0eb5d00856dc13a
-sensoshi_taikan_sjis.txt     wide    pages=412    carrylost=0    hash=99cc276ed9ad80c8
-sensoshi_taikan_utf8.txt     narrow  pages=324    carrylost=0    hash=2bd9c8fd59c5ea73
-sensoshi_taikan_utf8.txt     normal  pages=378    carrylost=0    hash=c0eb5d00856dc13a
-sensoshi_taikan_utf8.txt     wide    pages=412    carrylost=0    hash=99cc276ed9ad80c8
-shinnihonno_shinro_sjis.txt  narrow  pages=28     carrylost=0    hash=9daed43711bf3e2a
-shinnihonno_shinro_sjis.txt  normal  pages=33     carrylost=0    hash=68907508d23e573d
-shinnihonno_shinro_sjis.txt  wide    pages=36     carrylost=0    hash=e49c4ba751fb8e2a
-shinnihonno_shinro_utf8.txt  narrow  pages=28     carrylost=0    hash=9daed43711bf3e2a
-shinnihonno_shinro_utf8.txt  normal  pages=33     carrylost=0    hash=68907508d23e573d
-shinnihonno_shinro_utf8.txt  wide    pages=36     carrylost=0    hash=e49c4ba751fb8e2a
+# Refreshed at 30c2015b. The previous baseline predated the kinsoku change and so
+# reported its page counts as a difference every time -- a stale baseline is a
+# control that cries wolf, which is worse than none.
+f8test_sjis.txt              narrow  pages=42     carrylost=0    hash=e10448e2969da857
+f8test_sjis.txt              normal  pages=49     carrylost=0    hash=575368b0360a20c6
+f8test_sjis.txt              wide    pages=52     carrylost=0    hash=8123f0ec715ff92b
+f8test_utf8.txt              narrow  pages=42     carrylost=0    hash=e10448e2969da857
+f8test_utf8.txt              normal  pages=49     carrylost=0    hash=575368b0360a20c6
+f8test_utf8.txt              wide    pages=52     carrylost=0    hash=8123f0ec715ff92b
+saishu_sensoron_sjis.txt     narrow  pages=166    carrylost=0    hash=aed9ebe33c6d9d9c
+saishu_sensoron_sjis.txt     normal  pages=194    carrylost=0    hash=c921787f5aef853c
+saishu_sensoron_sjis.txt     wide    pages=211    carrylost=0    hash=2aaf4ab9da874794
+saishu_sensoron_utf8.txt     narrow  pages=166    carrylost=0    hash=aed9ebe33c6d9d9c
+saishu_sensoron_utf8.txt     normal  pages=194    carrylost=0    hash=c921787f5aef853c
+saishu_sensoron_utf8.txt     wide    pages=211    carrylost=0    hash=2aaf4ab9da874794
+sensoshi_taikan_sjis.txt     narrow  pages=325    carrylost=0    hash=833cac4c2b1f6467
+sensoshi_taikan_sjis.txt     normal  pages=379    carrylost=0    hash=33e9d1f9c1dac417
+sensoshi_taikan_sjis.txt     wide    pages=413    carrylost=0    hash=0c63191456c9b29c
+sensoshi_taikan_utf8.txt     narrow  pages=325    carrylost=0    hash=833cac4c2b1f6467
+sensoshi_taikan_utf8.txt     normal  pages=379    carrylost=0    hash=33e9d1f9c1dac417
+sensoshi_taikan_utf8.txt     wide    pages=413    carrylost=0    hash=0c63191456c9b29c
+shinnihonno_shinro_sjis.txt  narrow  pages=28     carrylost=0    hash=1d16e866bdd8e79f
+shinnihonno_shinro_sjis.txt  normal  pages=33     carrylost=0    hash=0649e27c5f5d6692
+shinnihonno_shinro_sjis.txt  wide    pages=36     carrylost=0    hash=236b216968e784ba
+shinnihonno_shinro_utf8.txt  narrow  pages=28     carrylost=0    hash=1d16e866bdd8e79f
+shinnihonno_shinro_utf8.txt  normal  pages=33     carrylost=0    hash=0649e27c5f5d6692
+shinnihonno_shinro_utf8.txt  wide    pages=36     carrylost=0    hash=236b216968e784ba
