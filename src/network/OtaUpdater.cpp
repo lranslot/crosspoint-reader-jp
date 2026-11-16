@@ -5,6 +5,8 @@
 // ip4_addr.h unless seen first. Pin this order; clang-format would otherwise sort
 // the local header last and break the build.
 #include "HttpDownloader.h"
+
+#include <HalSystem.h>
 #include <Logging.h>
 #include <ReleaseJsonParser.h>
 #include <esp_ota_ops.h>
@@ -203,6 +205,14 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
     LOG_ERR("OTA", "esp_ota_set_boot_partition failed: %s", esp_err_to_name(esp_err));
     return INTERNAL_UPDATE_ERROR;
   }
+
+  // Past this line the next boot is a different binary, so any crash report on
+  // the card belongs to the version being replaced. The SD route reaches the
+  // same call inside firmware_flash::flashFromSdPath, but this route does not
+  // go through it: it streams straight into the OTA partition with
+  // esp_ota_write. (The comment in FirmwareFlasher.h saying OTA stages via SD
+  // and then calls it does not describe this code.)
+  HalSystem::archiveCrashReportForUpdate();
 
   LOG_INF("OTA", "Update completed");
   return OK;
