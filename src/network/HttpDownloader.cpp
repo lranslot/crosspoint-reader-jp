@@ -12,6 +12,8 @@
 #include <HeapDiag.h>
 #include <SecureHttpClient.h>
 
+#include "NetDiag.h"
+
 extern "C" void wolfSSL_Arduino_Serial_Print(const char* const msg) { LOG_DBG("WOLFSSL", "%s", msg); }
 #else
 #include <esp_crt_bundle.h>
@@ -57,6 +59,37 @@ bool isRedirect(int status) {
 // file makes.
 void tlsHeapProbe(const char* tag, const char* detail) { heapdiag::sample(tag, detail); }
 
+// The connection shared by everything inside a KeepAliveScope, or null when no
+// scope is open. Not static-lifetime by accident: the scope's destructor
+// releases it, because an idle HTTPS connection costs a wolfSSL session plus
+// lwip's per-socket buffers.
+std::unique_ptr<freeink::SecureHttpClient> g_shared;
+
+// Applies the per-request settings that used to be applied to a fresh object.
+// begin() resets headers, body and status but deliberately does NOT close the
+// connection -- ensureConnected() decides that by comparing scheme/host/port --
+// so a reused client needs exactly this and nothing else.
+void configureRequest(freeink::SecureHttpClient& http, const std::string& url, const std::string& username,
+                      const std::string& password, bool& ok) {
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setInsecure();
+  if (!http.begin(url)) {
+    LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
+    ok = false;
+    return;
+  }
+  // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would
+  // append a second User-Agent header, which strict servers reject (aiohttp
+  // answers 400 "Duplicate 'User-Agent' header found").
+  http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
+  if (!username.empty() && !password.empty()) {
+    const std::string credentials = username + ":" + password;
+    const String encoded = base64::encode(credentials.c_str());
+    http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
+  }
+  ok = true;
+}
+
 HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std::string& username,
                                          const std::string& password, Sink& sink) {
   std::string url = startUrl;
@@ -65,23 +98,23 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
   // than tracking whether some other entry point got there first.
   freeink::SecureClient::setHeapProbe(&tlsHeapProbe);
 
+  // One client for every hop of this request, and -- when a KeepAliveScope is
+  // open -- for every request in the burst. Previously this was constructed
+  // inside the loop, so the keep-alive socket SecureHttpClient maintains was
+  // destroyed on each redirect and again on each file: the feature was
+  // implemented, documented, and never once in effect (spec 8.8-39).
+  //
+  // github.com redirecting to its CDN still costs a second handshake, because
+  // the host changes and connectionMatches() correctly refuses to reuse. What
+  // this recovers is every request after the first to the SAME host, which for
+  // a font family is every file but one.
+  freeink::SecureHttpClient local;
+  freeink::SecureHttpClient& http = g_shared ? *g_shared : local;
+
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
-    freeink::SecureHttpClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.setInsecure();
-    if (!http.begin(url)) {
-      LOG_ERR("HTTP", "wolfSSL bad URL: %s", url.c_str());
-      return HttpDownloader::HTTP_ERROR;
-    }
-    // setUserAgent replaces SecureHttpClient's built-in UA; addHeader would
-    // append a second User-Agent header, which strict servers reject (aiohttp
-    // answers 400 "Duplicate 'User-Agent' header found").
-    http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
-    if (!username.empty() && !password.empty()) {
-      const std::string credentials = username + ":" + password;
-      const String encoded = base64::encode(credentials.c_str());
-      http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
-    }
+    bool configured = false;
+    configureRequest(http, url, username, password, configured);
+    if (!configured) return HttpDownloader::HTTP_ERROR;
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
     const int status = http.GET(
@@ -272,6 +305,44 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
   sink.write = onData;
   return runGetSecure(url, username, password, sink) == OK;
 }
+
+// --- KeepAliveScope ---------------------------------------------------------
+//
+// Reports the PCB counts either side of the burst as well, because the question
+// left open by burn 14 is what a closed connection keeps hold of: the receive
+// buffer turned out to be 2,065 bytes while the largest free block fell 23,552,
+// so the cost is not the record buffer. See net_diag::describeTcpPcbs.
+#if defined(FREEINK_NET_WOLFSSL)
+HttpDownloader::KeepAliveScope::KeepAliveScope() {
+  if (g_shared) return;  // an outer scope already owns the connection
+  g_shared = makeUniqueNoThrow<freeink::SecureHttpClient>();
+  if (!g_shared) {
+    // Not fatal, and not silent: every request falls back to its own
+    // connection, which is exactly the behaviour this replaced.
+    LOG_ERR("HTTP", "OOM: keep-alive client, falling back to one connection per request");
+    return;
+  }
+  owner_ = true;
+  active_ = true;
+  char detail[96];
+  net_diag::describeTcpPcbs(detail, sizeof(detail));
+  heapdiag::sample("http-keepalive-open", detail);
+}
+
+HttpDownloader::KeepAliveScope::~KeepAliveScope() {
+  if (!owner_) return;
+  // end() closes the socket; destroying the client would too, but saying it
+  // explicitly is the contract this class exists for.
+  g_shared->end();
+  g_shared.reset();
+  char detail[96];
+  net_diag::describeTcpPcbs(detail, sizeof(detail));
+  heapdiag::sample("http-keepalive-close", detail);
+}
+#else
+HttpDownloader::KeepAliveScope::KeepAliveScope() = default;
+HttpDownloader::KeepAliveScope::~KeepAliveScope() = default;
+#endif
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
                                                              ProgressCallback progress, bool* cancelFlag,

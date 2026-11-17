@@ -1,5 +1,9 @@
 #include "FontDownloadActivity.h"
 
+#include <HeapDiag.h>
+
+#include "network/NetDiag.h"
+
 #include <ArduinoJson.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
@@ -282,6 +286,21 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     return;
   }
 
+  // One HTTPS connection for the whole family instead of one per file. Every
+  // .cpfont of a family comes from the same release URL, so after the first
+  // github.com -> CDN redirect every remaining request targets a host the
+  // connection already matches and reuses it, TLS session included.
+  //
+  // This is what SecureHttpClient's header always promised ("a multi-file
+  // download pays for one TLS handshake instead of one per request"); the
+  // client was being constructed inside the redirect loop, so nothing ever
+  // collected on it. See spec 8.8-39.
+  //
+  // Scoped to the loop deliberately: an idle kept-alive connection holds a
+  // wolfSSL session and lwip's per-socket buffers, which is the cost being
+  // reduced. It must not outlive the burst.
+  HttpDownloader::KeepAliveScope keepAlive;
+
   for (size_t i = 0; i < family.files.size(); i++) {
     const auto& file = family.files[i];
 
@@ -413,6 +432,11 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     currentFileIndex_++;
   }
 
+  // Arm the cooldown probe: the connections just used are now closed, so from
+  // here the only thing holding their memory is lwip.
+  cooldownStartedAt_ = millis();
+  cooldownStep_ = 0;
+
   fontInstaller_.refreshRegistry();
   family.installed = true;
   family.hasUpdate = false;
@@ -466,7 +490,31 @@ bool FontDownloadActivity::isSelectedFamilyDeletable() const {
 
 // --- Input handling ---
 
+// Samples the heap at fixed delays after the last connection closed, so a
+// recovery that happens on lwip's TIME-WAIT schedule can be told apart from one
+// that never happens. 65s is just past CONFIG_LWIP_TCP_MSL (60s); the earlier
+// marks exist so "recovered at 65" cannot be confused with "recovered early and
+// we only looked late".
+void FontDownloadActivity::serviceCooldownProbe() {
+  if (cooldownStartedAt_ == 0) return;
+  static constexpr uint32_t MARKS_MS[] = {0, 15000, 30000, 65000};
+  if (cooldownStep_ >= sizeof(MARKS_MS) / sizeof(MARKS_MS[0])) {
+    cooldownStartedAt_ = 0;  // done; stop checking
+    return;
+  }
+  const uint32_t elapsed = millis() - cooldownStartedAt_;
+  if (elapsed < MARKS_MS[cooldownStep_]) return;
+
+  char detail[112];
+  char pcbs[96];
+  net_diag::describeTcpPcbs(pcbs, sizeof(pcbs));
+  snprintf(detail, sizeof(detail), "t=%us %s", (unsigned)(elapsed / 1000), pcbs);
+  heapdiag::sample("dl-cooldown", detail);
+  cooldownStep_++;
+}
+
 void FontDownloadActivity::loop() {
+  serviceCooldownProbe();
   if (state_ == FAMILY_LIST) {
     auto activateSelected = [this] {
       if (families_.empty()) return;

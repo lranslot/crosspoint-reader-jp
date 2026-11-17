@@ -87,6 +87,20 @@ class FontDownloadActivity : public Activity {
   std::string errorMessage_;
   bool cancelRequested_ = false;
 
+  // Cooldown probe. Tests one specific hypothesis: that the contiguous heap a
+  // burst of downloads loses is held by lwip's TIME-WAIT PCBs, which this build
+  // keeps for CONFIG_LWIP_TCP_MSL = 60,000 ms. Every download in burn 14
+  // happened inside one such minute, so nothing had been observed after one
+  // elapsed. If the largest block recovers at the 65s mark and not before,
+  // TIME-WAIT is confirmed; if it never recovers, something is leaked and the
+  // hypothesis is wrong. Either answer is worth a burn.
+  //
+  // Samples are taken from loop() rather than a task: no stack to size, and the
+  // screen is idle anyway once the downloads have finished.
+  uint32_t cooldownStartedAt_ = 0;  // 0 = not armed
+  uint8_t cooldownStep_ = 0;
+  void serviceCooldownProbe();
+
   void onWifiSelectionComplete(bool success);
   bool fetchAndParseManifest();
   void downloadFamily(ManifestFamily& family);
