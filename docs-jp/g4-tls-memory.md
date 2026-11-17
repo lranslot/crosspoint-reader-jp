@@ -261,3 +261,170 @@ const bool enough = freeHeap >= MIN_FREE && maxBlock >= MIN_MAX_BLOCK;
 ★ **ただし順序に注意**: 置き場を自分に向けても、
 **TLS が入らない問題はそのまま残る**（同じ `HttpDownloader` を使う）。
 **#18 を先に直さないと、自分の置き場でも落ちる。**
+
+---
+
+## 7. ★ 案1 を入れた (2026-11-17)
+
+### 定義した場所と理由
+
+[platformio.ini](../platformio.ini) の wolfSSL フラグ群、`-DHAVE_SNI` の隣。
+
+★ **`user_settings.h` ではない理由**: あのファイルは
+`.pio/libdeps/default/Arduino-wolfSSL/` の中、すなわち**依存パッケージの一部**で、
+**更新のたびに作り直される。**そこへの編集は**警告なしに消える。**
+
+★ **`platformio.ini` の `build_flags` はライブラリの翻訳単位にも届く。**
+これは推測ではなく、**同じファイルに証拠がある** ── すぐ上の
+`HAVE_FFDHE_2048` / `HAVE_CURVE25519` のコメントが
+「ここで重複定義すると**ライブラリの全翻訳単位から**
+マクロ再定義の警告が出る」と書いている。
+
+### ★ ライブラリ側に届いていることの確認（3 通り、全部機械）
+
+**(1) 届かなければコンパイルが通らない。**
+wolfSSL は**宣言も同じ `#ifdef` の中**に置いている:
+
+    wolfssl/ssl.h:3938   WOLFSSL_API int wolfSSL_UseMaxFragment(WOLFSSL*, unsigned char);
+    #endif /* HAVE_MAX_FRAGMENT */   ← 3942 行
+
+    src/ssl.c:3122       #ifdef HAVE_MAX_FRAGMENT
+    src/ssl.c:3125       int wolfSSL_UseMaxFragment(WOLFSSL* ssl, byte mfl)
+
+★ **アプリ側だけに届いた場合は宣言も無いので「not declared in this scope」で落ちる。**
+通ったこと自体が片側だけでない証拠になる。
+
+**(2) `nm` で前後を突き合わせた。**
+
+| | `wolfSSL_UseMaxFragment` | `TLSX_UseMaxFragment` |
+|---|---|---|
+| 焼き12 の `.elf`（定義前） | ★ **0 個** | ★ **0 個** |
+| 今回（定義後） | ★ `T` あり | ★ `T` あり |
+
+**(3) wolfSSL 自身のオブジェクトに入っている。**
+`libf9f/Arduino-wolfSSL/src/tls.c.o` に `T TLSX_UseMaxFragment` ──
+**拡張の機構そのものがライブラリ側でコンパイルされている。**
+
+### Flash の増分
+
+| | 焼き12 | 今回 | 差 |
+|---|---|---|---|
+| RAM | 50,412 | **50,420** | ★ **+8 B** |
+| Flash | 5,663,889 | **5,664,657** | ★ **+768 B** |
+
+★ **+768 B。**計器（4 点）も同じ差に含まれている。
+
+### ★ 効くかどうかは、サーバー次第である（正直に書く）
+
+`max_fragment_length` は**お願い**であって命令ではない。
+RFC 6066 を無視するサーバーは 16KB の記録を送り続け、
+その場合は**従来どおり 16,454 B の連続要求が起きる。**
+
+★ **GitHub と、そのリダイレクト先の CDN が従うかは分からない。**
+だから次節の計器を入れた ── **数字で見るまで「直った」と書かない。**
+
+---
+
+## 8. ★ 張る瞬間の計器
+
+`SecureClient` に 4 点。`/heap.txt` に出る:
+
+| タグ | いつ | 見るもの |
+|---|---|---|
+| `tls-before` | TCP 接続後、`wolfSSL_connect` の直前 | ハンドシェイクが始まる床 |
+| `tls-handshake` | ハンドシェイク完了直後 | ★ **山。**証明書鎖を受けて入力バッファが伸びきった所 |
+| `tls-record` | 最初の応用記録を復号した直後 | ★ **ここが案1 の答え** |
+| `tls-after` | セッション解放後 | 戻ったか |
+
+各行の `detail` に ★ **`maxfrag=2048`**（未定義なら `maxfrag=0`）が付く ──
+**どちらのファームウェアが書いた行かをログだけで判別できる**ようにした
+（§8.8-32 の「基準がいつのものかを実行時に言う」）。
+`tls-record` には受けた記録の `bytes=N` も付く。
+
+### ★ 設計上の判断
+
+- **関数ポインタで渡す**（`std::function` を使わない）──
+  CLAUDE.md の方針どおり。ヒープを測る場所でヒープを確保する実装は採れない
+- ★ **SDK にアプリの診断を持ち込まない** ──
+  `freeink-sdk` 側は `HeapProbe` という関数ポインタを 1 本持つだけ。
+  `heapdiag::sample` への橋渡しは `HttpDownloader.cpp`（アプリ側）に置いた
+- ★ **外から測れないので内に置くしかなかった** ──
+  受信バッファは `wolfSSL_read` の**中で**伸びて解放されるので、
+  アプリが呼ぶ 2 つの呼び出しの**あいだ**に山が来る。§8.8-36 のとおり
+- `tls-after` は**セッションが実在したときだけ**出す ──
+  `stop()` は接続試行の先頭でも呼ばれるので、
+  無かったものの解放を 1 行出すと**解放に見えて解放でない行**になる
+
+### ★ 案1 の前後で何を見るか
+
+    tls-handshake free=... max=...  maxfrag=2048
+    tls-record    free=... max=...  maxfrag=2048 bytes=2048   ← 2048 なら従った
+    tls-record    free=... max=...  maxfrag=2048 bytes=16384  ← 無視された
+
+★ **連続要求の最大は `max` の落ち込みで見る。**
+`tls-before` の `max` と `tls-handshake` の `max` の差が、
+**その 1 枚の確保の大きさ**である。16.5KB 落ちれば効いておらず、
+2KB 程度なら効いている。
+
+### ★ 案2 の要否は、この数字を見てから
+
+同意いただいたとおり、**案1 で足りるなら案2（再起動が増える）は要らない。**
+閾値が経路ごとに変えられない件（`NetworkHeapGuard.cpp` のファイル内
+`constexpr` 2 本、`Target` は再起動先の画面だけを選ぶ）は
+**案2 を入れるときに一緒に直す。今回は記録のみ。**
+
+---
+
+## 9. ★ コメントを根拠にした手当ての洗い出し
+
+呼び出し元を**数えた**（コメントを読まずに）:
+
+    grep -rn "flashFromSdPath" --include=*.cpp src    → 1 件
+    grep -rn "sameAsRunning"   --include=*.cpp src    → 1 件
+
+| 対象 | コメントの主張 | ★ 実際 | 影響 |
+|---|---|---|---|
+| `flashFromSdPath` | 「SD と OTA の**両方がここに来る**」 | ★ **SD だけ。呼び出し元 1 箇所** | crash_report の退避が OTA を覆っていなかった（`4ea6064a` で修正） |
+| ★ `sameAsRunning` | STATUS #13「**共有済み**、要るのは確認の段だけ」 | ★ **呼び出し元 1 箇所。しかも `const char* sdPath` を取る** | ★ **OTA は SD にファイルを置かないので、そのままでは呼べない。**STATUS #13 を訂正した |
+| `runningPartitionChipId` | （主張なし） | ★ **本当に共有**（`FirmwareFlasher.cpp:145` と `OtaUpdater.cpp:156`） | 問題なし |
+| 第 3 の書き込み経路 | ─ | ★ **無い**（`esp_ota_*` / `ota_boot::switchTo` の grep で 2 ファイルのみ） | Web からの焼きは存在しない |
+
+`FirmwareFlasher.h` の当該コメントは、**誤りであることと、
+それを信じて何が起きたか**を書いた形に差し替えた
+（消すと、次の人が同じ推論をして同じ罠に落ちる）。
+
+
+---
+
+## 10. ★ 計器は submodule の中にある（版文字列が `-dirty` になる）
+
+★ **`SecureClient` は `freeink-sdk` の中で、これは git submodule である。**
+`origin` は**上流**の `https://github.com/Free-Ink/freeink-sdk.git`、
+`a485dc46` で detached。**こちらから commit できない。**
+
+| | |
+|---|---|
+| 作業ツリーの編集 | 動く（ビルドに入る）が ★ **どこにも記録されない** |
+| `git submodule update` | ★ **黙って捨てる** |
+| 親リポジトリでの見え方 | `M freeink-sdk` |
+| ★ 版文字列 | ★ **`-dirty` が付く** |
+
+★ **`-dirty` が付くのは正しい。**バイナリに**どのコミットにも無いコード**が
+入っているので、§8.8-34 の仕掛けが**意図どおり働いている。**
+抑制してはいけない。
+
+### 取った措置
+
+`patches/freeink-sdk-tls-heap-probe.patch` として**親リポジトリの履歴に入れた。**
+submodule の作業ツリーが消えても、仕事は残る。
+→ [patches/README.md](../patches/README.md)
+
+### ★ 本当の解決は羅闇さんの判断である
+
+`freeink-sdk` を**自分の fork に向け替え**、そこへ commit して
+親にポインタを記録すれば、この patch は普通のコミットになり
+`-dirty` も消える。★ **これはリポジトリ構成の決定なので、
+クラッシュを直すついでに黙ってやることではない。**
+
+★ **急ぐ必要はない** ── 計測のためだけなら、`-dirty` のまま焼いて構わない。
+むしろ**ラベルが付いているほうが安全**である（配布物と区別が付く）。

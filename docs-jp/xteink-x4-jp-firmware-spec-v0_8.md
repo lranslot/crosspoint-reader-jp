@@ -4262,6 +4262,80 @@ SD フォント側にはもう 1 枚、`SdCardFont::resolveStyle()`
 
     → [lib/Epub/Epub/Section.cpp](../lib/Epub/Epub/Section.cpp)
 
+37. **★★ 無効な緩和策は、読んだ者に「対処済み」と読ませる。
+    有るように見えて効いていないものは、無いものより悪い** (2026-11-17)
+
+    `SecureClient.cpp:112` に、TLS の記録を 2KB に抑える呼び出しが
+    **症状の説明つきで**書かれていた:
+
+        #ifdef HAVE_MAX_FRAGMENT
+          // a default 16KB record demands a ~17KB contiguous allocation
+          // -- measured failing (MEMORY_E mid-download) at ~20KB free heap
+          wolfSSL_UseMaxFragment(ssl, WOLFSSL_MFL_2_11);
+        #endif
+
+    ★ **`HAVE_MAX_FRAGMENT` は、この `#ifdef` 以外のどこにも無かった。**
+    `platformio.ini` にも `user_settings.h` にも無い。
+    **コメントは正確で、測定も本物で、コンパイルされていなかった。**
+
+    ★ **私（Claude）は最初これを読んで「対処済み」と判断した。**
+    無い手当てなら「無い」と分かる。
+    **有るように見える手当ては、探すのをやめさせる。**
+    項目 32（古い baseline は毎回鳴る）と同根で、
+    あちらは「鳴りすぎて見なくなる」、こちらは「見て安心する」。
+
+    ★ **確認の仕掛け**（文章ではなく機械で）:
+    `wolfSSL` は**宣言も `#ifdef` の中**に置いているので、
+    アプリ側だけに定義が届いた場合は**コンパイルが通らない。**
+    さらに `nm` で前後を突き合わせた ──
+    焼き12 の `.elf` に `wolfSSL_UseMaxFragment` は **0 個**、
+    定義後は `T wolfSSL_UseMaxFragment` と `T TLSX_UseMaxFragment`。
+
+    **運用**: `#ifdef` で囲った手当てを書くときは、
+    **同じコミットでその定義も入れる。**
+    入れられない事情があるなら、`#ifdef` の隣に
+    「**この定義は現在どこにも無い**」と書く。
+
+    → [docs-jp/g4-tls-memory.md](g4-tls-memory.md)
+
+38. **★★ コメントは実装の証拠ではない。
+    「ここに合流する」を根拠に 1 箇所だけ手当てすると、
+    合流しない経路が無防備に残る** (2026-11-17)
+
+    `FirmwareFlasher.h` のヘッダコメント:
+
+        Both the SD update activity and the OTA path land here.
+        OTA first downloads the firmware to an SD-card cache file,
+        then calls this.
+
+    ★ **そうなっていない。**`flashFromSdPath` の呼び出し元は
+    `SdFirmwareUpdateActivity` **1 箇所だけ**で、
+    OTA は `esp_ota_begin/write/end` を自分で回し、
+    受信コールバックの中で**パーティションへ直接書く。**
+
+    ★ **私（Claude）はこの一文を「決定的な一文」として引用し、
+    それを根拠に crash_report の退避先を 1 箇所に決めた。**
+    結果、**ファームウェアをダウンロードする経路だけが無防備に残った**
+    ── いちばん退避が要る経路である。
+    羅闇さんの (b) の問い（「OTA も同じ経路か」）で気付いた。
+
+    ★ **同じ前提で立っていたものを洗ったら、もう 1 件あった:**
+    STATUS #13 が「比較関数は共有済み（両者は合流する）、
+    要るのは確認の段だけ」としていたが、
+    `sameAsRunning(const char* sdPath)` は **SD のパスを取る。**
+    OTA はイメージを SD に置かないので**渡すファイルが無く、
+    そのままでは呼べない。**見積もりが小さすぎた。
+
+    **運用**: 「ここに合流する」「ここが唯一の入口」を根拠に
+    置き場所を決めるときは、**コメントではなく呼び出し元を数える。**
+
+        grep -rn "flashFromSdPath" --include=*.cpp src   # → 1 件
+
+    1 行で済む。**そしてコメントは、間違っていても何も言わない**
+    （計器と同じ。項目 32 の一般形）。
+
+    → [src/network/FirmwareFlasher.h](../src/network/FirmwareFlasher.h)
+
 ---
 
 ## 9. 上流との関係
