@@ -1,12 +1,9 @@
 #include "FontDownloadActivity.h"
 
-#include <HeapDiag.h>
-
-#include "network/NetDiag.h"
-
 #include <ArduinoJson.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <HeapDiag.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -20,6 +17,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
+#include "network/NetDiag.h"
 
 FontDownloadActivity::FontDownloadActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
     : Activity("FontDownload", renderer, mappedInput), fontInstaller_(sdFontSystem.registry()) {}
@@ -28,7 +26,12 @@ FontDownloadActivity::FontDownloadActivity(GfxRenderer& renderer, MappedInputMan
 
 void FontDownloadActivity::onEnter() {
   Activity::onEnter();
-  WiFi.mode(WIFI_STA);
+  // No WiFi.mode() here. It used to be, and it put station mode -- a 45,056 B
+  // contiguous allocation -- in front of the only gate that could have stopped
+  // it: netheap::ensureHeadroom(), which runs inside WifiSelectionActivity.
+  // Both paths through that activity set the mode themselves
+  // (WifiSelectionActivity.cpp:120 and :377), so this line bought nothing and
+  // cost the guard its position.
   startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
                          [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
 }
@@ -85,94 +88,171 @@ bool FontDownloadActivity::fetchAndParseManifest() {
     return false;
   }
 
-  // HTTP client is now closed — TLS buffers freed. Parse JSON from file.
-  HalFile manifestFile;
-  if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
-    LOG_ERR("FONT", "Failed to open temp manifest");
+  // The second gate for this screen, and the one with real numbers behind it.
+  // The TLS buffers are gone and the manifest is on the card, so what is left
+  // to pay for is the parse. Two complete runs priced it: burn 14 arrived here
+  // with 52,396 B free and built all 35 families; burn 15 arrived with 45,612
+  // and aborted inside the loop. The largest block was 27,636 B in BOTH runs,
+  // so it does not separate them and is deliberately not tested -- free heap
+  // is what decided. 50,000 sits between the two.
+  //
+  // This gate does not restart, unlike the one before the radio: Wi-Fi is
+  // already up and the reader is three screens in, so losing the session costs
+  // more than it returns. It takes the existing error route instead, which
+  // leaves them on a screen that says why.
+  constexpr uint32_t MIN_FREE_TO_PARSE = 50000;
+  const uint32_t freeBeforeParse = ESP.getFreeHeap();
+  if (freeBeforeParse < MIN_FREE_TO_PARSE) {
+    char detail[64];
+    snprintf(detail, sizeof(detail), "rejected need=%u", (unsigned)MIN_FREE_TO_PARSE);
+    heapdiag::sample("manifest-gate", detail);
+    LOG_ERR("FONT", "Not enough heap to parse the font list (free=%u need=%u)", (unsigned)freeBeforeParse,
+            (unsigned)MIN_FREE_TO_PARSE);
+    errorMessage_ = tr(STR_NETWORK_LOW_MEMORY);
     Storage.remove(MANIFEST_TMP);
-    errorMessage_ = "Failed to read font list";
     return false;
   }
 
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, manifestFile);
-  manifestFile.close();
-  Storage.remove(MANIFEST_TMP);
+  size_t familyCount = 0;
+  size_t fileCount = 0;
 
-  if (err) {
-    LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
-    errorMessage_ = "Invalid font manifest";
-    return false;
-  }
-
-  int version = doc["version"] | 0;
-  if (version != FONTS_MANIFEST_VERSION) {
-    LOG_ERR("FONT", "Unsupported manifest version: %d", version);
-    errorMessage_ = "Unsupported manifest version";
-    return false;
-  }
-
-  baseUrl_ = doc["baseUrl"] | "";
-  families_.clear();
-  fontInstaller_.refreshRegistry();
-
-  JsonArray familiesArr = doc["families"].as<JsonArray>();
-  families_.reserve(familiesArr.size());
-
-  for (JsonObject fObj : familiesArr) {
-    ManifestFamily family;
-    family.name = fObj["name"] | "";
-    family.description = fObj["description"] | "";
-
-    for (JsonVariant s : fObj["styles"].as<JsonArray>()) {
-      family.styles.push_back(s.as<std::string>());
+  // The JsonDocument is scoped, and the scope is the point. It holds the whole
+  // parsed manifest -- 29,187 bytes of JSON on the current release -- and
+  // everything that used to run inside its lifetime (the registry scan, and an
+  // SD open per installed file) now runs after it is gone.
+  {
+    HalFile manifestFile;
+    if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
+      LOG_ERR("FONT", "Failed to open temp manifest");
+      Storage.remove(MANIFEST_TMP);
+      errorMessage_ = "Failed to read font list";
+      return false;
     }
 
-    family.totalSize = 0;
-    for (JsonObject fileObj : fObj["files"].as<JsonArray>()) {
-      ManifestFile file;
-      file.name = fileObj["name"] | "";
-      file.size = fileObj["size"] | 0;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, manifestFile);
+    const size_t jsonBytes = manifestFile.fileSize();
+    manifestFile.close();
+    Storage.remove(MANIFEST_TMP);
 
-      if (!fileObj["crc32"].is<uint32_t>()) {
-        LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name.c_str());
-        errorMessage_ = "Invalid font manifest";
-        return false;
+    if (err) {
+      LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
+      errorMessage_ = "Invalid font manifest";
+      return false;
+    }
+
+    // What the document itself costs, measured for the first time here. Until
+    // burn 16 this figure was never taken: the gap between the manifest
+    // download and the abort had no instrument in it at all.
+    {
+      char detail[64];
+      snprintf(detail, sizeof(detail), "json=%u bytes", (unsigned)jsonBytes);
+      heapdiag::sample("manifest-parsed", detail);
+    }
+
+    int version = doc["version"] | 0;
+    if (version != FONTS_MANIFEST_VERSION) {
+      LOG_ERR("FONT", "Unsupported manifest version: %d", version);
+      errorMessage_ = "Unsupported manifest version";
+      return false;
+    }
+
+    baseUrl_ = doc["baseUrl"] | "";
+    families_.clear();
+
+    JsonArray familiesArr = doc["families"].as<JsonArray>();
+    families_.reserve(familiesArr.size());
+
+    for (JsonObject fObj : familiesArr) {
+      ManifestFamily family;
+      family.name = fObj["name"] | "";
+      family.description = fObj["description"] | "";
+
+      // Resource protocol 7: reserve before any push_back loop. The outer
+      // vector already did this; the two inner ones did not, and on the
+      // current release that cost 203 growth events -- each one a fresh
+      // block, a copy of every element, and a free of the old block.
+      JsonArray stylesArr = fObj["styles"].as<JsonArray>();
+      family.styles.reserve(stylesArr.size());
+      for (JsonVariant s : stylesArr) {
+        family.styles.push_back(s.as<std::string>());
       }
-      file.crc32 = fileObj["crc32"].as<uint32_t>();
 
-      family.totalSize += file.size;
-      family.files.push_back(std::move(file));
+      JsonArray filesArr = fObj["files"].as<JsonArray>();
+      family.files.reserve(filesArr.size());
+      family.totalSize = 0;
+      for (JsonObject fileObj : filesArr) {
+        ManifestFile file;
+        file.name = fileObj["name"] | "";
+        file.size = fileObj["size"] | 0;
+
+        if (!fileObj["crc32"].is<uint32_t>()) {
+          LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name.c_str());
+          errorMessage_ = "Invalid font manifest";
+          return false;
+        }
+        file.crc32 = fileObj["crc32"].as<uint32_t>();
+
+        family.totalSize += file.size;
+        family.files.push_back(std::move(file));
+      }
+
+      fileCount += family.files.size();
+      families_.push_back(std::move(family));
     }
+    familyCount = families_.size();
 
+    // The peak: the document and the built list are both resident on this
+    // line. The counts are here so a manifest that has grown can be told from
+    // a device that has less to give -- "35 families / 150 files" is the
+    // current release, and a future failure that reads "60 families" says
+    // which of the two moved.
+    {
+      char detail[80];
+      snprintf(detail, sizeof(detail), "families=%u files=%u", (unsigned)familyCount, (unsigned)fileCount);
+      heapdiag::sample("manifest-families", detail);
+    }
+  }
+
+  // From here the document is gone. The registry scan walks /.fonts and builds
+  // its own vector of families; it used to do that with the 29 KB document
+  // still resident, which is where burn 15 died.
+  fontInstaller_.refreshRegistry();
+  {
+    char detail[80];
+    snprintf(detail, sizeof(detail), "families=%u files=%u", (unsigned)familyCount, (unsigned)fileCount);
+    heapdiag::sample("registry-after", detail);
+  }
+
+  // Installed/update detection, also moved out of the document's lifetime. It
+  // opens one file per entry of an installed family, so it is the other thing
+  // that used to pile on top of the peak.
+  for (auto& family : families_) {
     family.installed = fontInstaller_.isFamilyInstalled(family.name.c_str());
+    if (!family.installed) continue;
 
     // Detect updates by comparing manifest file sizes with files on disk.
     // Not a checksum, but a size mismatch reliably indicates a rebuild in practice.
-    if (family.installed) {
-      for (const auto& file : family.files) {
-        char path[128];
-        FontInstaller::buildFontPath(family.name.c_str(), file.name.c_str(), path, sizeof(path));
-        HalFile f;
-        if (Storage.openFileForRead("FONT", path, f)) {
-          size_t actual = f.fileSize();
-          f.close();
-          if (actual != file.size) {
-            family.hasUpdate = true;
-            break;
-          }
-        } else {
-          // File missing on disk but family dir exists — treat as update
+    for (const auto& file : family.files) {
+      char path[128];
+      FontInstaller::buildFontPath(family.name.c_str(), file.name.c_str(), path, sizeof(path));
+      HalFile f;
+      if (Storage.openFileForRead("FONT", path, f)) {
+        size_t actual = f.fileSize();
+        f.close();
+        if (actual != file.size) {
           family.hasUpdate = true;
           break;
         }
+      } else {
+        // File missing on disk but family dir exists - treat as update
+        family.hasUpdate = true;
+        break;
       }
     }
-
-    families_.push_back(std::move(family));
   }
 
-  LOG_DBG("FONT", "Manifest loaded: %zu families", families_.size());
+  LOG_DBG("FONT", "Manifest loaded: %u families, %u files", (unsigned)familyCount, (unsigned)fileCount);
   return true;
 }
 
@@ -365,9 +445,9 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
           }
 
           constexpr int PROGRESS_STEP_PERCENT = 5;
-          const int step = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total /
-                                                        PROGRESS_STEP_PERCENT)
-                                     : -1;
+          const int step =
+              total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total / PROGRESS_STEP_PERCENT)
+                        : -1;
           if (step == lastShownStep) return;
           lastShownStep = step;
           requestUpdate(true);
