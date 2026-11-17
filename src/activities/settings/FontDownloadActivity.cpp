@@ -297,16 +297,60 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
 
     std::string url = baseUrl_ + file.name;
 
+    // Repaint only when the bar would actually move, not on every received
+    // chunk. Copied from OtaUpdater::installUpdate (src/network/OtaUpdater.cpp,
+    // "Fire the callback only on whole-percent change"), which states the
+    // reason: per-chunk updates wake the render task, and its framebuffer work
+    // contends with TLS on the same internal arena. The font path had no such
+    // throttle, so a download repainted roughly every 2KB received.
+    //
+    // It matters more here than there. Drawing the screen loads glyphs, and the
+    // glyph/advance caches are PERSISTENT -- "Cleared only on font unload or
+    // clearPersistentCache()" (lib/EpdFont/SdCardFont.h). The network heap
+    // guard empties them on the way in, so every repaint during a download
+    // allocates long-lived blocks in between the short-lived ones a TLS session
+    // takes and gives back. Measured on burn 13: free returned to within 24
+    // bytes of where it started while the largest block fell 42,996 -> 34,804
+    // -> 9,204 across three downloads, and the third aborted. Total came back;
+    // contiguous space did not. See docs-jp/g4-tls-memory.md.
+    //
+    // Step is 5%, i.e. at most 20 repaints per file instead of ~100 for a 200KB
+    // font at READ_CHUNK = 2048. Why 5 and not 1: the bar is the content width
+    // less the side padding, about 450px in the narrowest orientation, so one
+    // percent moves it ~4.5px -- under the width of the bar's own border -- and
+    // the panel needs 1-2s for a refresh it cannot deliver 100 times anyway. At
+    // 5% the bar jumps ~22px, which reads as movement. A file small enough that
+    // 5% is fewer than one chunk simply reports every chunk, as before.
+    //
+    // The screen does not look stuck at this rate: the line above the bar reads
+    // "<family> (3/11)", so the file counter advances even while one file's bar
+    // is between steps, and no single .cpfont is large enough to sit at one
+    // percentage for long.
+    int lastShownStep = -1;
     auto result = HttpDownloader::downloadToFile(
         url, destPath,
-        [this](size_t downloaded, size_t total) {
+        [this, &lastShownStep](size_t downloaded, size_t total) {
           fileProgress_ = downloaded;
           fileTotal_ = total;
+
+          // Deliberately NOT throttled: this is the cancel button. OtaUpdater
+          // throttles its whole callback because that callback only redraws,
+          // but Back is sampled here, and sampling it once per 5% would make
+          // the user hold the button down to be noticed.
           mappedInput.update();
           if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
               mappedInput.wasPressed(MappedInputManager::Button::Back)) {
             cancelRequested_ = true;
+            requestUpdate(true);  // show the cancellation at once
+            return;
           }
+
+          constexpr int PROGRESS_STEP_PERCENT = 5;
+          const int step = total > 0 ? static_cast<int>(static_cast<uint64_t>(downloaded) * 100 / total /
+                                                        PROGRESS_STEP_PERCENT)
+                                     : -1;
+          if (step == lastShownStep) return;
+          lastShownStep = step;
           requestUpdate(true);
         },
         &cancelRequested_);
