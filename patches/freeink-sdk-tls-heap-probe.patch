@@ -37,10 +37,21 @@ index 8d1ee1e..0f070d3 100644
  
  }  // namespace freeink
 diff --git a/libs/network/SecureNet/src/SecureClient.cpp b/libs/network/SecureNet/src/SecureClient.cpp
-index 26d3abc..246ec70 100644
+index 26d3abc..43b028c 100644
 --- a/libs/network/SecureNet/src/SecureClient.cpp
 +++ b/libs/network/SecureNet/src/SecureClient.cpp
-@@ -53,8 +53,42 @@ bool isWantIo(const int err) {
+@@ -5,6 +5,10 @@
+ // integration point for the TLS 1.3 transport.
+ #if defined(FREEINK_NET_WOLFSSL)
+ #include <wolfssl/ssl.h>
++// For ssl->buffers.inputBuffer.bufferSize: the size wolfSSL has grown its
++// receive buffer to, which is the figure the max_fragment_length extension is
++// supposed to hold down. There is no public accessor for it.
++#include <wolfssl/internal.h>
+ #endif
+ 
+ namespace freeink {
+@@ -53,8 +57,90 @@ bool isWantIo(const int err) {
    // an out-of-memory handshake spin until the deadline instead of failing fast.
    return err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE;
  }
@@ -66,14 +77,62 @@ index 26d3abc..246ec70 100644
 +// decides whether everything else survives. A measured run showed both failing
 +// independently -- one pass entered with max=61,428 and still ended at
 +// free=2,048.
-+void probe(const char* tag, const int extra = -1) {
++// Counts TLS sessions since boot, so the three downloads of one font family can
++// be told apart in the log. The question being measured is no longer "can a
++// handshake happen" but "what does the Nth one cost", and without this the
++// lines are indistinguishable.
++uint16_t g_session = 0;
++
++// Readings at the previous tls-before, so tls-after can state the round trip in
++// one line instead of making the reader subtract two lines that are 30 lines
++// apart in the file.
++uint32_t g_freeAtStart = 0;
++uint32_t g_maxAtStart = 0;
++
++void probe(const char* tag, WOLFSSL* ssl, const int lastRead = -1) {
 +  if (!g_heapProbe) return;
-+  char detail[64];
-+  if (extra >= 0) {
-+    snprintf(detail, sizeof(detail), "maxfrag=%d bytes=%d", maxFragmentBytes(), extra);
-+  } else {
-+    snprintf(detail, sizeof(detail), "maxfrag=%d", maxFragmentBytes());
++
++  // The two record buffers, read straight out of the session. inbuf is the
++  // one that matters: GrowInputBuffer() sizes it to the largest record the peer
++  // has sent, so it IS the answer to "did the server honour the 2KB request" --
++  // 2KB-ish means yes, ~16.4KB means no.
++  //
++  // Not available through the public API, hence the internal.h include. If a
++  // wolfSSL update moves these fields this stops compiling, which is the right
++  // failure: a diagnostic that silently reads the wrong offset is worse than
++  // none (spec 8.8-30).
++  unsigned inbuf = 0;
++  unsigned outbuf = 0;
++  if (ssl) {
++    inbuf = static_cast<unsigned>(ssl->buffers.inputBuffer.bufferSize);
++    outbuf = static_cast<unsigned>(ssl->buffers.outputBuffer.bufferSize);
 +  }
++
++  char detail[128];
++  if (lastRead >= 0) {
++    // read= is the return of wolfSSL_read, NOT a record size. It is reported
++    // because it was previously labelled "bytes=" and read as one: the first
++    // read of a response is a one-byte read from the header line parser, so it
++    // said bytes=1 on every session and answered nothing. Kept, honestly named.
++    snprintf(detail, sizeof(detail), "s=%u maxfrag=%d inbuf=%u outbuf=%u read=%d", (unsigned)g_session,
++             maxFragmentBytes(), inbuf, outbuf, lastRead);
++  } else {
++    snprintf(detail, sizeof(detail), "s=%u maxfrag=%d inbuf=%u outbuf=%u", (unsigned)g_session, maxFragmentBytes(),
++             inbuf, outbuf);
++  }
++  g_heapProbe(tag, detail);
++}
++
++// tls-after also states what came back, because the fault now under
++// investigation is not a failed handshake but a heap that degrades across
++// repeated sessions: free returned to within 24 bytes while the largest block
++// fell 42,996 -> 18,420 and never recovered. A line that says "free +24
++// max -24,576" is the whole finding; two lines to subtract is not.
++void probeClose(const char* tag, const uint32_t freeNow, const uint32_t maxNow) {
++  if (!g_heapProbe) return;
++  char detail[128];
++  snprintf(detail, sizeof(detail), "s=%u maxfrag=%d dfree=%+d dmax=%+d", (unsigned)g_session, maxFragmentBytes(),
++           (int)((int32_t)freeNow - (int32_t)g_freeAtStart), (int)((int32_t)maxNow - (int32_t)g_maxAtStart));
 +  g_heapProbe(tag, detail);
 +}
  }  // namespace
@@ -83,19 +142,22 @@ index 26d3abc..246ec70 100644
  int SecureClient::connectWithMethod(const char* host, uint16_t port, void* method, const char* label) {
  #if defined(FREEINK_WOLFSSL_DEBUG)
    // Routes wolfSSL's internal trace through wolfSSL_Arduino_Serial_Print (the
-@@ -119,6 +153,11 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
+@@ -119,6 +205,14 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
    wolfSSL_UseMaxFragment(ssl, WOLFSSL_MFL_2_11);
  #endif
  
 +  // Everything above is allocated: CTX, SSL, the extension list. Nothing of the
 +  // record buffers is, because they are grown on first use. Sampling here gives
 +  // the floor the handshake starts from.
-+  probe("tls-before");
++  g_session++;
++  g_freeAtStart = ESP.getFreeHeap();
++  g_maxAtStart = ESP.getMaxAllocHeap();
++  probe("tls-before", ssl);
 +
    // The recv callback is non-blocking (returns WANT_READ when no bytes are
    // buffered), so wolfSSL_connect must be retried across handshake round-trips
    // rather than called once.
-@@ -142,6 +181,11 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
+@@ -142,6 +236,11 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
      delay(5);
    }
    _connected = true;
@@ -103,11 +165,11 @@ index 26d3abc..246ec70 100644
 +  // The certificate chain has been received and parsed by now, so the input
 +  // buffer has been grown to the largest handshake record the server sent. This
 +  // is where the peak is if there is one.
-+  probe("tls-handshake");
++  probe("tls-handshake", static_cast<WOLFSSL*>(_ssl));
    if (Serial) {
      Serial.printf("[SecureClient] handshake ok (%s): %s / %s in %lu ms\n", label, wolfSSL_get_version(ssl),
                    wolfSSL_get_cipher(ssl), (unsigned long)(millis() - started));
-@@ -179,7 +223,17 @@ int SecureClient::read(uint8_t* buf, size_t size) {
+@@ -179,7 +278,17 @@ int SecureClient::read(uint8_t* buf, size_t size) {
    if (!_connected) return -1;
    auto* ssl = static_cast<WOLFSSL*>(_ssl);
    const int n = wolfSSL_read(ssl, buf, size);
@@ -119,14 +181,14 @@ index 26d3abc..246ec70 100644
 +      // ~2KB; without it the server is free to send 16KB and wolfSSL will grow
 +      // to 16,454 bytes contiguous to hold it. The difference between this
 +      // sample and tls-handshake is the figure the whole change is about.
-+      probe("tls-record", n);
++      probe("tls-record", ssl, n);
 +    }
 +    return n;
 +  }
  
    const int err = wolfSSL_get_error(ssl, n);
    if (isWantIo(err)) return 0;
-@@ -201,10 +255,16 @@ int SecureClient::available() {
+@@ -201,10 +310,19 @@ int SecureClient::available() {
  }
  
  void SecureClient::stop() {
@@ -139,11 +201,14 @@ index 26d3abc..246ec70 100644
 +  // Only when there was something to free: stop() is also called at the top of
 +  // every connect attempt, and a sample for a session that never existed would
 +  // be a line that looks like a release and is not one.
-+  if (hadSession) probe("tls-after");
++  // After the frees, so it reports what came back rather than what was still
++  // standing (spec 8.8-33/35). The session is gone by now, so the buffer sizes
++  // cannot be read here -- the deltas are the point.
++  if (hadSession) probeClose("tls-after", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
  }
  
  uint8_t SecureClient::connected() { return _connected && _transport.connected(); }
-@@ -222,6 +282,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
+@@ -222,6 +340,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
  int SecureClient::available() { return 0; }
  void SecureClient::stop() { _transport.stop(); _connected = false; }
  uint8_t SecureClient::connected() { return 0; }

@@ -4336,6 +4336,43 @@ SD フォント側にはもう 1 枚、`SdCardFont::resolveStyle()`
 
     → [src/network/FirmwareFlasher.h](../src/network/FirmwareFlasher.h)
 
+39. **★★ 機能は「書かれているか」ではなく「効いているか」で見る。
+    無効化の仕方は `#ifdef` だけではない — 寿命でも無効化される** (2026-11-17)
+
+    項目 37 は `#ifdef` で無効化された手当ての話だった。
+    **同じ焼きで、別の無効化の仕方が 2 件見つかった。**
+
+    ★ **(1) オブジェクトの寿命で無効化されていた。**
+    `SecureHttpClient.h` のヘッダは宣言している ──
+    「接続は keep-alive で使い回され、**複数ファイルのダウンロードは
+    1 回のハンドシェイクで済む**」。機能は全部実装されている
+    （`_reuse = true`、`keep-alive` ヘッダ、`closeConnection()` の条件）。
+
+        for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+          freeink::SecureHttpClient http;   ← ループの中
+
+    **毎ホップ生まれて死ぬので、使い回しは一度も起きない。**
+    `#ifdef` は grep で見つかるが、**寿命は grep で見つからない。**
+
+    ★ **(2) 手当てが片方の経路にしか無かった。**
+    `OtaUpdater.cpp` は進捗コールバックを整数%に絞っており、
+    理由まで書いてある（「per-chunk updates wake the render task,
+    whose framebuffer work **contends with TLS on the internal arena**」）。
+    ★ **`FontDownloadActivity` には同じ絞りが無い** ──
+    受信チャンクごとに `requestUpdate(true)` を呼ぶ。
+    **同じコードベースの中に、同じ問題の答えが既にあった。**
+
+    **運用**: 「これは手当て済み」と読む前に、**3 つを確かめる。**
+
+        ① 定義があるか（項目 37）
+        ② その経路を通るか（項目 38 ── 呼び出し元を数える）
+        ③ ★ 効く寿命で生きているか
+
+    ★ **そして「同じ問題を他の経路がどう解いたか」を先に探す。**
+    今回は OTA 側に答えがあり、**真似るだけで済んだ。**
+
+    → [docs-jp/g4-tls-memory.md](g4-tls-memory.md) §11, §14
+
 ---
 
 ## 9. 上流との関係

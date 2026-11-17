@@ -428,3 +428,224 @@ submodule の作業ツリーが消えても、仕事は残る。
 
 ★ **急ぐ必要はない** ── 計測のためだけなら、`-dirty` のまま焼いて構わない。
 むしろ**ラベルが付いているほうが安全**である（配布物と区別が付く）。
+
+---
+
+# 第2部 — 焼き13 の結果：原因が入れ替わった (2026-11-17)
+
+★ **案1 は効いた。**焼き12 は最初の `wolfSSL GET` で即死していたが、
+焼き13 は**ハンドシェイクが3回とも成功**した。
+
+★ **そして原因が移った** ── 「TLS が入らない」ではなく
+「**ダウンロードを重ねるごとにヒープが悪化する**」。
+
+| 回 | `tls-before` の空き | 最大ブロック | 結果 |
+|---|---|---|---|
+| ① | 46,780 | **42,996** | 完走 |
+| ② | 44,664 | **34,804** | 完走 |
+| ③ | 23,100 | ★ **9,204** | ★ **abort** |
+
+★ **空きは戻るのに最大ブロックが戻らない** ── 教科書どおりの断片化である。
+①の `tls-after` は `free=46,804`（**+24 B、ほぼ完全に戻っている**）なのに
+`max=18,420`（**−24,576 B**）。
+
+## 10. (e) `0x421b3da9` の解決
+
+    0x421b3da9: __cxxabiv1::__terminate(void (*)())
+                at libsupc++/eh_terminate.cc:45
+
+★ **前回（`0x421b36d7` = `eh_personality.cc`）の 1 段下**である。
+同じ連鎖の別の地点を捉えただけで、**意味は同じ**:
+投げられた例外が受け手を見つけられず `terminate` に来た ──
+**素の `new` の `std::bad_alloc`。**
+
+★ **TLS が失敗したのではない。**wolfSSL は `XMALLOC` が NULL を返し
+`SecureClient` が `return 0` する経路を持っており、abort にはならない。
+**TLS が食った結果、別の誰かが落ちた。**
+
+## 11. (b) 接続を張り直しているか — ★ 張り直している。しかも設計を裏切っている
+
+[SecureHttpClient.h:11-14](../freeink-sdk/libs/network/SecureNet/include/SecureHttpClient.h) の宣言:
+
+> Connections are kept alive and reused across requests to the same
+> scheme://host:port (see setReuse), so a burst of requests — an OPDS crawl,
+> a sync exchange, **a multi-file download** — pays for **one TLS handshake
+> instead of one per request**.
+
+★ **機能は実装されている**（`_reuse = true` が既定、`keep-alive` ヘッダ、
+`closeConnection()` の条件分岐も全部ある）。
+
+★ **呼び出し側が無効にしている。**`runGetWolf` は
+
+    for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+      freeink::SecureHttpClient http;      ← ★ ループの中で構築
+
+**毎ホップごとに生まれて死ぬ**ので、keep-alive のソケットは
+**リダイレクト 1 回ごとに捨てられる。**さらに `downloadToFile` は
+**ファイルごとに `runGetWolf` を呼ぶ**ので、使い回しは一度も起きない。
+
+★ **GitHub は CDN へリダイレクトするので、1 ファイルにつき TLS セッションは 2 本。**
+3 ファイルで 6 本。羅闇さんの観測（3 回の `tls-before`）は
+**完走した分だけ**が見えている数字である。
+
+★ **これは §8.8-37 と同じ形である** ── 機能は書かれていて、効いていない。
+あちらは `#ifdef` で、こちらは**オブジェクトの寿命**で無効化されている。
+
+## 12. (a) `tls-after` で最大ブロックが戻らない — 何が残るか
+
+`SecureClient::stop()` は 3 つとも解放している（コードで確認）:
+
+    wolfSSL_free(_ssl)        → WOLFSSL 892 B ＋ 入出力バッファ
+    wolfSSL_CTX_free(_ctx)    → WOLFSSL_CTX 1,732 B
+    _transport.stop()         → WiFiClient
+
+★ **CTX は使い回していない** ── `connectWithMethod` が毎回 `wolfSSL_CTX_new` する。
+これは**無駄だが漏れではない**（毎回解放されている）。
+
+★ **戻らないものの最有力候補は lwip である。**`sdkconfig.default` の実測値:
+
+    CONFIG_LWIP_TCP_SND_BUF_DEFAULT = 5,744
+    CONFIG_LWIP_TCP_WND_DEFAULT     = 5,760
+    CONFIG_LWIP_TCP_MSS             = 1,436
+    CONFIG_LWIP_MAX_SOCKETS         = 16
+
+★ **1 ソケットあたり送受信で約 11.5 KB**、加えて PCB。
+そして **TCP は閉じたあと PCB を TIME_WAIT で保持する**（lwip の既定 MSL は 60 秒）。
+
+★ **ダウンロードは 4.4 秒・8.8 秒……と 60 秒の中で起きている。**
+つまり**前の接続の PCB が生きたまま次の接続が張られる。**
+①の `tls-after` で `max` が 24,576 B 落ちて戻らないのは、
+**この積み上がりと整合する。**
+
+★ **ただしこれは仮説である。**lwip の PCB は確保したことを我々に言わない。
+確かめるには **`tls-after` の後にもう 1 点**（あるいは
+`esp_get_free_internal_heap_size` と `lwip_stats`）が要る。
+**今は「整合する」までしか言えない。**
+
+## 13. (c) SD への書き込みバッファ — ★ 寄与は小さい
+
+| | 1 ダウンロードあたり |
+|---|---|
+| `HalFile::Impl` | `std::make_unique` 1 個（数十 B）、`close()` で解放 |
+| SdFat のセクタキャッシュ | ★ **マウント時に確保、使い回し**（1 ダウンロードごとではない） |
+| `Sink::write` / `Sink::progress` | ★ **`std::function` 2 本** ── 閉包をヒープに置く（各数十 B） |
+
+★ **大きな per-download バッファは無い。**
+`std::function` 2 本は CLAUDE.md の方針に反するが、**規模が違う**
+（数十 B 対 11 KB）ので、ここが原因ではない。
+
+## 14. (d) 進捗画面のグリフ読み込み — ★ 機構としては本物。しかも前例がある
+
+★ **`FontDownloadActivity` の進捗コールバックは、受信チャンクごとに
+`requestUpdate(true)` を呼んでいる**（`READ_CHUNK = 2048` なので
+200 KB のフォントで **約 100 回**）。
+
+★ **同じ問題を OTA 側は既に手当てしている**
+（[OtaUpdater.cpp:167](../src/network/OtaUpdater.cpp)）:
+
+> Fire the callback only on whole-percent change. **Per-chunk updates wake the
+> render task, whose framebuffer work contends with TLS on the internal arena**,
+> and e-ink can't repaint faster than a percent tick anyway.
+
+★ **フォント側には、この手当てが無い。**
+
+そして描画で確保されるものは**短命ではない**:
+[SdCardFont.h:298](../lib/EpdFont/SdCardFont.h) ──
+「amortizes SD reads. **Cleared only on font unload or `clearPersistentCache()`**」。
+
+★ **つまりグリフと送り表は常駐する。**
+`net-guard` が入口で `releaseFontCaches(true)` を呼んで空にしているので、
+**ダウンロード中に 0 から積み直される** ── TLS と lwip の大きな塊の
+**あいだに、長命の小さな塊が挟まる。**
+
+★ **これが「空きは戻るのに最大ブロックが戻らない」の素直な説明である。**
+解放された 11 KB の穴の中に、**解放されないグリフが座っている。**
+
+## 15. (3) 計器を直した — `bytes=1` は私の誤りだった
+
+★ **`bytes=` はレコードの大きさではなく `wolfSSL_read()` の戻り値だった。**
+`SecureHttpClient` は**応答ヘッダを 1 バイトずつ**読む
+（`line += static_cast<char>(ch)`、:494）ので、
+**最初の read は必ず 1 バイト**である。3 回とも 1 が出たのは正しく、
+**答えていた問いが違った。**§8.8-29（1 が何を数えているか）に当たる。
+
+### 本物の数字が取れた
+
+`ssl->buffers.inputBuffer.bufferSize` を**直接読む**ようにした
+（`wolfssl/internal.h` を include。公開 API に無い）。
+★ **これが「GitHub が 2KB の要求に従ったか」の答えである** ──
+`GrowInputBuffer()` が**相手が送ってきた最大のレコードに合わせて**
+この値を決めるので:
+
+    inbuf=2117 前後  → ★ 従った
+    inbuf=16454      → ★ 無視された
+
+★ wolfSSL の版が上がってこのフィールドが動いたら**コンパイルが通らなくなる** ──
+それが正しい壊れ方である（§8.8-30、**黙って違う場所を読む計器は無いより悪い**）。
+
+### 出る行（焼き14）
+
+    tls-before    free=... max=...  s=1 maxfrag=2048 inbuf=0     outbuf=0
+    tls-handshake free=... max=...  s=1 maxfrag=2048 inbuf=N     outbuf=M
+    tls-record    free=... max=...  s=1 maxfrag=2048 inbuf=N     outbuf=M read=1
+    tls-after     free=... max=...  s=1 maxfrag=2048 dfree=+24 dmax=-24576
+
+★ 変えたもの 4 つ:
+
+1. ★ **`inbuf=` / `outbuf=`** ── 受信バッファの実寸。**これが正式な指標**
+2. ★ **`s=N`（セッション番号）** ── 回を重ねるごとの悪化が本題になったので、
+   **何本目かを言わない行は読めない**
+3. ★ **`tls-after` は差で出す**（`dfree` / `dmax`）──
+   「**戻るべきものが戻っているか**」が 1 行で分かる。
+   30 行離れた 2 行を引き算させない（指示 4 への対応）
+4. **`bytes=` → `read=`** に改名し、**レコード長ではない**と明記
+
+### ★ 8,192 という値について — 分からない
+
+★ **正直に書く: `tls-before` → `tls-handshake` の `max` の減り 8,192 を、
+特定の 1 個の確保に結び付けられていない。**
+
+分かっていること:
+
+- 2048 を要求したのに 8,192 落ちているので、**要求が通ったとしても
+  受信バッファ 1 枚では説明できない**
+- `max` の減りは「1 枚の確保の大きさ」とは**限らない** ──
+  最大ブロックの**内側**に小さな確保が置かれれば、
+  そのブロックは 2 つに割れ、`max` は**確保量よりずっと大きく**落ちる
+- ★ **同じ行で `free` は 2,080 B **増えて** いる**（46,780 → 48,860）。
+  ハンドシェイクは**正味で返している** ── 一時領域を解放したうえで、
+  どこかに小さな杭を打った形である
+- 候補: lwip の PCB / 受信 pbuf（§12）、`FP_MAX_BITS=8192` に由来する
+  fast-math の一時領域（1 個 2,048 B）、証明書鎖の複製
+
+★ **`inbuf=` が入った焼き14 で決まる** ── `inbuf` が 2KB 台なら
+8,192 は受信バッファではなく、断片化か lwip である。
+
+★ **指標としては「`max` の減り」を正式にする**（指示 3 のご提案どおり）。
+ただし上の 2 番目の理由から、**これは「確保の大きさ」ではなく
+「連続領域がどれだけ失われたか」と読むこと。**より厳しい側の数字である。
+
+## 16. 案（★ 実装しない）
+
+安い順。**(d) が最も安く、前例がある。**
+
+| | 案 | 効果 | 代償 | 根拠 |
+|---|---|---|---|---|
+| ★ **A** | **進捗の更新を整数%に絞る**（OTA と同じ） | 描画回数 約100 → 約100分の1。**長命グリフの挟まりが減る** | 進捗バーが粗くなる（e-ink は毎%も描けない） | ★ **OTA に同じ手当てが実装済み。**[OtaUpdater.cpp:167](../src/network/OtaUpdater.cpp) |
+| ★ **B** | **`SecureHttpClient` をループの外へ出す** | ★ **設計が意図した keep-alive が初めて効く。**TLS セッション 6 本 → 1〜2 本 | リダイレクト先ホストが変わる回は結局張り直す（GitHub→CDN） | ★ **ヘッダが「multi-file download は 1 回のハンドシェイクで済む」と宣言している** |
+| **C** | **ダウンロードの前にフォントキャッシュを解放** | 挟まった長命の塊を落とす | ファイルごとに再読込（遅くなる） | matcha-reader #584 と同じ考え |
+| **D** | **ファイルごとに新しい `SecureHttpClient`＋間に待ち** | TIME_WAIT を抜けさせる | 1 ファイルごとに最大 60 秒 ── ★ **論外** | § |
+| **E** | **lwip のソケットバッファを削る** | 1 接続の代償そのものを下げる | 転送速度が落ちる。全ネットワーク機能に影響 | `TCP_SND_BUF`/`TCP_WND` |
+
+★ **推すのは A → B** である。
+
+- **A** は**他人が同じ問題を同じコードベースで既に解いている** ──
+  真似るだけで、リスクがほぼ無い
+- **B** は**書かれた意図を有効にするだけ**（§8.8-37 と同じ構図）。
+  ただし `runGetWolf` のリダイレクト処理に手が入るので A より重い
+- ★ **C は A と B を測ったあとで判断する。**
+  グリフを落とすと**描画が遅くなり、進捗が余計に遅れる**ので、
+  A で描画回数が減っていれば**不要になる可能性がある**
+
+★ **測ってから決める。**焼き14 の `inbuf=` と `dmax=` が揃えば、
+「受信バッファか／断片化か／lwip か」が切り分けられる。
