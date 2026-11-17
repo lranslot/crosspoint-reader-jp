@@ -11,8 +11,23 @@
 // esp_partition_write + ota_boot::switchTo (no Arduino Update class, no
 // esp_image_verify — those reject our patched image on X4 silicon).
 //
-// Both the SD update activity and the OTA path land here. OTA first
-// downloads the firmware to an SD-card cache file, then calls this.
+// CORRECTED 2026-11-17: the previous text here said "Both the SD update
+// activity and the OTA path land here. OTA first downloads the firmware to an
+// SD-card cache file, then calls this." That is not what the code does, and the
+// claim was taken at face value: the crash-report archiving added in 62b36693
+// was placed in this one function on the strength of it and left the OTA route
+// unprotected.
+//
+// flashFromSdPath has exactly ONE caller: SdFirmwareUpdateActivity. The OTA
+// route (OtaUpdater::installUpdate) never stages to SD -- it drives
+// esp_ota_begin/write/end itself, writing each received chunk straight into the
+// partition from inside the download callback. Anything that must happen on
+// every successful update therefore has to be placed in BOTH, or moved to
+// something both call.
+//
+// What is genuinely shared is runningPartitionChipId(), used by both for the
+// wrong-MCU check. sameAsRunning() is not: it takes an SD path, and the OTA
+// route has no file to give it (see STATUS #13).
 
 namespace firmware_flash {
 

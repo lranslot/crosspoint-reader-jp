@@ -9,6 +9,7 @@
 #include <string>
 
 #if defined(FREEINK_NET_WOLFSSL)
+#include <HeapDiag.h>
 #include <SecureHttpClient.h>
 
 extern "C" void wolfSSL_Arduino_Serial_Print(const char* const msg) { LOG_DBG("WOLFSSL", "%s", msg); }
@@ -46,9 +47,23 @@ bool isRedirect(int status) {
 }
 
 #if defined(FREEINK_NET_WOLFSSL)
+// Routes SecureClient's four TLS samples into /heap.txt. Installed once; the
+// SDK holds a plain function pointer and fires it only if one is set, so this
+// costs nothing in builds that never call a download.
+//
+// It lives here rather than in the SDK because the SDK must not depend on the
+// application's diagnostics, and the samples cannot be taken from here: the
+// receive buffer is grown and freed inside wolfSSL_read, between two calls this
+// file makes.
+void tlsHeapProbe(const char* tag, const char* detail) { heapdiag::sample(tag, detail); }
+
 HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std::string& username,
                                          const std::string& password, Sink& sink) {
   std::string url = startUrl;
+
+  // Idempotent: the probe is a single pointer, and reinstalling it is cheaper
+  // than tracking whether some other entry point got there first.
+  freeink::SecureClient::setHeapProbe(&tlsHeapProbe);
 
   for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
     freeink::SecureHttpClient http;

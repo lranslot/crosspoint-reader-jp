@@ -1,0 +1,155 @@
+diff --git a/libs/network/SecureNet/include/SecureClient.h b/libs/network/SecureNet/include/SecureClient.h
+index 8d1ee1e..0f070d3 100644
+--- a/libs/network/SecureNet/include/SecureClient.h
++++ b/libs/network/SecureNet/include/SecureClient.h
+@@ -51,6 +51,25 @@ class SecureClient : public Client {
+   // True if the library was built with wolfSSL TLS 1.3 support enabled.
+   static bool tls13Available();
+ 
++  // Optional heap probe, fired at the four points where a TLS session's memory
++  // cost is decided. A plain function pointer rather than std::function: the
++  // latter heap-allocates its closure and costs 2-4KB of binary per signature,
++  // which is the wrong trade in the one place we are measuring heap.
++  //
++  // It exists because the cost cannot be measured from outside: wolfSSL's
++  // receive buffer is sized to each incoming record inside wolfSSL_read, so the
++  // peak is reached and released between two calls the application makes. The
++  // SDK stays free of the application's diagnostics -- the application installs
++  // the probe and decides what to do with the tags.
++  //
++  // Tags, in the order they fire:
++  //   tls-before     after the TCP connect, before wolfSSL_connect
++  //   tls-handshake  handshake complete (the peak, if there is one)
++  //   tls-record     first record decrypted (first wolfSSL_read that returns data)
++  //   tls-after      session freed
++  using HeapProbe = void (*)(const char* tag, const char* detail);
++  static void setHeapProbe(HeapProbe probe);
++
+  private:
+   int connectWithMethod(const char* host, uint16_t port, void* method, const char* label);
+ 
+@@ -60,6 +79,7 @@ class SecureClient : public Client {
+   void* _ssl = nullptr;  // WOLFSSL* (opaque to keep wolfSSL headers out of here)
+   void* _ctx = nullptr;  // WOLFSSL_CTX*
+   bool _connected = false;
++  bool _firstRecordSeen = false;  // so tls-record fires once per session
+ };
+ 
+ }  // namespace freeink
+diff --git a/libs/network/SecureNet/src/SecureClient.cpp b/libs/network/SecureNet/src/SecureClient.cpp
+index 26d3abc..246ec70 100644
+--- a/libs/network/SecureNet/src/SecureClient.cpp
++++ b/libs/network/SecureNet/src/SecureClient.cpp
+@@ -53,8 +53,42 @@ bool isWantIo(const int err) {
+   // an out-of-memory handshake spin until the deadline instead of failing fast.
+   return err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE;
+ }
++
++// What the max_fragment_length extension asked the peer for, in bytes, or 0
++// when the extension is not compiled in. Printed with every sample so the
++// before/after comparison is readable from the log alone rather than from
++// knowing which firmware wrote it.
++int maxFragmentBytes() {
++#ifdef HAVE_MAX_FRAGMENT
++  return 2048;  // WOLFSSL_MFL_2_11
++#else
++  return 0;
++#endif
++}
++
++// Installed by the application; null unless it asked to measure.
++SecureClient::HeapProbe g_heapProbe = nullptr;
++
++// Reports free heap and, separately, the largest single block. Both are needed:
++// the TLS receive buffer is ONE allocation sized to the incoming record, so the
++// largest block is what decides whether it can be made, while the total is what
++// decides whether everything else survives. A measured run showed both failing
++// independently -- one pass entered with max=61,428 and still ended at
++// free=2,048.
++void probe(const char* tag, const int extra = -1) {
++  if (!g_heapProbe) return;
++  char detail[64];
++  if (extra >= 0) {
++    snprintf(detail, sizeof(detail), "maxfrag=%d bytes=%d", maxFragmentBytes(), extra);
++  } else {
++    snprintf(detail, sizeof(detail), "maxfrag=%d", maxFragmentBytes());
++  }
++  g_heapProbe(tag, detail);
++}
+ }  // namespace
+ 
++void SecureClient::setHeapProbe(const HeapProbe probe) { g_heapProbe = probe; }
++
+ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* method, const char* label) {
+ #if defined(FREEINK_WOLFSSL_DEBUG)
+   // Routes wolfSSL's internal trace through wolfSSL_Arduino_Serial_Print (the
+@@ -119,6 +153,11 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
+   wolfSSL_UseMaxFragment(ssl, WOLFSSL_MFL_2_11);
+ #endif
+ 
++  // Everything above is allocated: CTX, SSL, the extension list. Nothing of the
++  // record buffers is, because they are grown on first use. Sampling here gives
++  // the floor the handshake starts from.
++  probe("tls-before");
++
+   // The recv callback is non-blocking (returns WANT_READ when no bytes are
+   // buffered), so wolfSSL_connect must be retried across handshake round-trips
+   // rather than called once.
+@@ -142,6 +181,11 @@ int SecureClient::connectWithMethod(const char* host, uint16_t port, void* metho
+     delay(5);
+   }
+   _connected = true;
++  _firstRecordSeen = false;
++  // The certificate chain has been received and parsed by now, so the input
++  // buffer has been grown to the largest handshake record the server sent. This
++  // is where the peak is if there is one.
++  probe("tls-handshake");
+   if (Serial) {
+     Serial.printf("[SecureClient] handshake ok (%s): %s / %s in %lu ms\n", label, wolfSSL_get_version(ssl),
+                   wolfSSL_get_cipher(ssl), (unsigned long)(millis() - started));
+@@ -179,7 +223,17 @@ int SecureClient::read(uint8_t* buf, size_t size) {
+   if (!_connected) return -1;
+   auto* ssl = static_cast<WOLFSSL*>(_ssl);
+   const int n = wolfSSL_read(ssl, buf, size);
+-  if (n > 0) return n;
++  if (n > 0) {
++    if (!_firstRecordSeen) {
++      _firstRecordSeen = true;
++      // First application record. With the extension honoured this buffer is
++      // ~2KB; without it the server is free to send 16KB and wolfSSL will grow
++      // to 16,454 bytes contiguous to hold it. The difference between this
++      // sample and tls-handshake is the figure the whole change is about.
++      probe("tls-record", n);
++    }
++    return n;
++  }
+ 
+   const int err = wolfSSL_get_error(ssl, n);
+   if (isWantIo(err)) return 0;
+@@ -201,10 +255,16 @@ int SecureClient::available() {
+ }
+ 
+ void SecureClient::stop() {
++  const bool hadSession = _ssl != nullptr;
+   if (_ssl) { wolfSSL_free(static_cast<WOLFSSL*>(_ssl)); _ssl = nullptr; }
+   if (_ctx) { wolfSSL_CTX_free(static_cast<WOLFSSL_CTX*>(_ctx)); _ctx = nullptr; }
+   _transport.stop();
+   _connected = false;
++  _firstRecordSeen = false;
++  // Only when there was something to free: stop() is also called at the top of
++  // every connect attempt, and a sample for a session that never existed would
++  // be a line that looks like a release and is not one.
++  if (hadSession) probe("tls-after");
+ }
+ 
+ uint8_t SecureClient::connected() { return _connected && _transport.connected(); }
+@@ -222,6 +282,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
+ int SecureClient::available() { return 0; }
+ void SecureClient::stop() { _transport.stop(); _connected = false; }
+ uint8_t SecureClient::connected() { return 0; }
++// Accepted and ignored: the stub has no session whose memory could be measured,
++// and callers must not need to know which build they are linked against.
++void SecureClient::setHeapProbe(HeapProbe probe) { (void)probe; }
+ 
+ #endif
+ 
