@@ -1,4 +1,3 @@
-#include "network/NetworkHeapGuard.h"
 #include "WifiSelectionActivity.h"
 
 #include <GfxRenderer.h>
@@ -16,9 +15,32 @@
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/NetworkHeapGuard.h"
 
 void WifiSelectionActivity::onEnter() {
   Activity::onEnter();
+
+  // The chokepoint for station mode. Nine screens launch this activity -- file
+  // transfer, Calibre, OTA, font download, clock sync, OPDS, KOReader auth and
+  // sync, settings -- and all nine arrive here before the radio comes up, so
+  // one check covers them all.
+  //
+  // It sits in onEnter() rather than in startWifiScan() because onEnter()
+  // returns early when the last-used network is reachable: that fast path
+  // joins without scanning and so skipped the guard entirely. The burn 15 log
+  // shows the consequence -- no net-guard line at all on the run that aborted,
+  // and the font screen entered with 91,048 B free where the one recorded
+  // success needed 100,428.
+  //
+  // Target::Home, not FileTransfer: this activity does not know which of the
+  // nine routes launched it, and landing an OTA request on the file-transfer
+  // screen would answer a question nobody asked. The file-transfer route has
+  // its own guard earlier, in CrossPointWebServerActivity::onEnter(), so that
+  // one does come back to where it was going. The rest get the popup saying
+  // why, then Home -- explained, not silent.
+  //
+  // May not return: see NetworkHeapGuard.h.
+  netheap::ensureHeadroom(renderer, "sta", netheap::Target::Home);
 
   // Load saved WiFi credentials - SD card operations need lock as we use SPI
   // for both
@@ -100,16 +122,11 @@ void WifiSelectionActivity::startWifiScan(const bool autoScan) {
   // below. Guarding the activity rather than its callers covers all nine with
   // one check, and puts the check where the radio is actually turned on.
   //
-  // Target::Home, not FileTransfer: this activity does not know which of the
-  // nine routes launched it, and landing an OTA request on the file-transfer
-  // screen would answer a question nobody asked. The file-transfer route has
-  // its own guard earlier, in CrossPointWebServerActivity::onEnter(), so that
-  // one does come back to where it was going. The rest get the popup saying
-  // why, then Home -- explained, not silent.
-  //
-  // May not return: see NetworkHeapGuard.h.
-  netheap::ensureHeadroom(renderer, "sta", netheap::Target::Home);
-
+  // The guard used to be here, and this was not the chokepoint it claimed to
+  // be: onEnter() returns early via tryAutoConnectCredential() whenever the
+  // last-used network is reachable, which is the ordinary case, and that path
+  // never reaches this function. It has moved to onEnter(), which both paths
+  // do pass. See the comment there.
   autoConnecting = autoScan;
   manualNetworkListRequested = false;
   state = WifiSelectionState::SCANNING;

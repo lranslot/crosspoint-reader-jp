@@ -73,7 +73,10 @@ void OtaUpdateActivity::onEnter() {
 
   // Turn on WiFi immediately
   LOG_DBG("OTA", "Turning on WiFi...");
-  WiFi.mode(WIFI_STA);
+  // Deliberately no WiFi.mode() before WifiSelectionActivity: station mode is a
+  // 45,056 B contiguous allocation and must come after
+  // netheap::ensureHeadroom(), which runs in that activity's onEnter(). Both of
+  // its paths set the mode themselves.
 
   // Launch WiFi selection subactivity
   LOG_DBG("OTA", "Launching WifiSelectionActivity...");
