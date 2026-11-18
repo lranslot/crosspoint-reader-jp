@@ -35,8 +35,20 @@
 // this build, so they are walked under LOCK_TCPIP_CORE().
 namespace net_diag {
 
-// Writes "pcb act=N tw=M bound=K" into out, for a heapdiag detail field.
-// Always NUL-terminates. Writes "pcb unavailable" if the lists cannot be read.
+// Writes "pcb act=N tw=M bound=K lsn=L" into out, for a heapdiag detail field,
+// and appends "(walked, all lists empty)" when every count is zero.
+//
+// There is no "unavailable" case: LOCK_TCPIP_CORE and the list heads are
+// compile-time bindings, so if this builds it reads lwip's real state. That is
+// why all-zero gets an explicit suffix instead -- the risk is not a failed
+// read, it is a correct zero being mistaken for one.
+//
+// WHERE IT MUST BE CALLED: at a moment when the thing being counted exists.
+// Burn 16 took both of its samples from KeepAliveScope's constructor and
+// destructor, which bracket the SCOPE and not the connection: the constructor
+// only allocates the client, and the destructor runs after end() has closed the
+// socket. Both correctly reported nothing open. Counting connections requires
+// sampling while one is up (spec 8.8-36).
 void describeTcpPcbs(char* out, size_t outSize);
 
 }  // namespace net_diag

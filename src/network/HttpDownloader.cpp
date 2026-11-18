@@ -90,6 +90,25 @@ void configureRequest(freeink::SecureHttpClient& http, const std::string& url, c
   ok = true;
 }
 
+// Why a transfer ended, written where the answer is actually known.
+//
+// The activity above can only see one of four DownloadError values, and three
+// different failures collapse into HTTP_ERROR: a negative status from the
+// client, a status that is neither 200 nor a redirect, and a body that stopped
+// short. Burn 16 showed what that costs -- the screen said "Download failed:
+// Pretendard_10.cpfont" and the card held a 0-byte file, and nothing recorded
+// whether the server refused, the stream broke or the write failed. The serial
+// LOG_ERR lines say which, and serial is not available on this device.
+//
+// got=/want= is the second half of the answer: 0 of 2,544,893 is a different
+// fault from 2,100,000 of 2,544,893.
+void dlResult(const char* why, const int status, const Sink& sink) {
+  char detail[112];
+  snprintf(detail, sizeof(detail), "why=%s status=%d got=%u want=%u", why, status, (unsigned)sink.downloaded,
+           (unsigned)sink.total);
+  heapdiag::sample("dl-result", detail);
+}
+
 HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std::string& username,
                                          const std::string& password, Sink& sink) {
   std::string url = startUrl;
@@ -121,6 +140,16 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         [&http, &sink](const uint8_t* data, size_t len) {
           if (http.getStatus() != 200) return true;
           if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
+          if (sink.downloaded == 0) {
+            // The first body byte of this response. For a font this is the
+            // point at which the connection is provably carrying payload, so
+            // it is also the one place the PCB counts mean something.
+            char detail[128];
+            char pcbs[96];
+            net_diag::describeTcpPcbs(pcbs, sizeof(pcbs));
+            snprintf(detail, sizeof(detail), "want=%u %s", (unsigned)sink.total, pcbs);
+            heapdiag::sample("dl-first-bytes", detail);
+          }
           if (!sink.write(data, len)) return false;
           sink.downloaded += len;
           if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
@@ -128,31 +157,44 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         },
         [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
 
-    if (http.aborted()) return HttpDownloader::ABORTED;
+    if (http.aborted()) {
+      dlResult("cancelled", status, sink);
+      return HttpDownloader::ABORTED;
+    }
     if (status < 0) {
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
+      dlResult("client-failed", status, sink);
       return HttpDownloader::HTTP_ERROR;
     }
     if (isRedirect(status)) {
       const std::string location = http.getHeader("location");
       if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
         LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
+        dlResult("bad-redirect", status, sink);
         return HttpDownloader::HTTP_ERROR;
       }
       continue;
     }
     if (status != 200) {
       LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
+      dlResult("bad-status", status, sink);
       return HttpDownloader::HTTP_ERROR;
     }
-    if (http.callbackAborted()) return HttpDownloader::FILE_ERROR;
+    if (http.callbackAborted()) {
+      // sink.write returned false: the SD write failed, not the network.
+      dlResult("sd-write-failed", status, sink);
+      return HttpDownloader::FILE_ERROR;
+    }
     if (!http.responseComplete()) {
       LOG_ERR("HTTP", "wolfSSL incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+      dlResult("short-body", status, sink);
       return HttpDownloader::HTTP_ERROR;
     }
+    dlResult("ok", status, sink);
     return HttpDownloader::OK;
   }
   LOG_ERR("HTTP", "too many redirects");
+  dlResult("too-many-redirects", -1, sink);
   return HttpDownloader::HTTP_ERROR;
 }
 #endif
@@ -324,18 +366,34 @@ HttpDownloader::KeepAliveScope::KeepAliveScope() {
   }
   owner_ = true;
   active_ = true;
-  char detail[96];
-  net_diag::describeTcpPcbs(detail, sizeof(detail));
+  // Nothing is connected yet -- this only allocated the client -- so the counts
+  // here are the baseline the pair in the destructor is read against, not a
+  // measurement of an open connection.
+  char detail[112];
+  char pcbs[96];
+  net_diag::describeTcpPcbs(pcbs, sizeof(pcbs));
+  snprintf(detail, sizeof(detail), "baseline (nothing open yet) %s", pcbs);
   heapdiag::sample("http-keepalive-open", detail);
 }
 
 HttpDownloader::KeepAliveScope::~KeepAliveScope() {
   if (!owner_) return;
+
+  // Two samples, and the pair is the measurement. The single sample burn 16
+  // took was after end() had already closed the socket, so its act=0 was
+  // correct and useless. This one runs first, while the kept-alive connection
+  // is still up, and is the positive control for the walk itself.
+  char detail[96];
+  net_diag::describeTcpPcbs(detail, sizeof(detail));
+  heapdiag::sample("http-keepalive-live", detail);
+
   // end() closes the socket; destroying the client would too, but saying it
   // explicitly is the contract this class exists for.
   g_shared->end();
   g_shared.reset();
-  char detail[96];
+
+  // And this one after. act should fall and tw should rise, which is the
+  // TIME-WAIT hypothesis stated as a before/after rather than argued.
   net_diag::describeTcpPcbs(detail, sizeof(detail));
   heapdiag::sample("http-keepalive-close", detail);
 }
