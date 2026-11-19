@@ -62,7 +62,12 @@ class FontDownloadActivity : public Activity {
   struct ManifestFamily {
     std::string name;
     std::string description;
-    std::vector<std::string> styles;
+    // No styles vector. The manifest carries one per family and nothing in
+    // this tree ever read it -- the only five lines that mentioned it were the
+    // declaration and the code filling it. Upstream reached the same
+    // conclusion and removed it in PR #3398. On the current release it cost 35
+    // allocations (one reserve per family) to build something no screen,
+    // installer or registry consulted.
     std::vector<ManifestFile> files;
     size_t totalSize = 0;
     bool installed = false;

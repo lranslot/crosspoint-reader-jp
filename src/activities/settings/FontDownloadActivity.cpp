@@ -169,15 +169,10 @@ bool FontDownloadActivity::fetchAndParseManifest() {
       family.description = fObj["description"] | "";
 
       // Resource protocol 7: reserve before any push_back loop. The outer
-      // vector already did this; the two inner ones did not, and on the
-      // current release that cost 203 growth events -- each one a fresh
-      // block, a copy of every element, and a free of the old block.
-      JsonArray stylesArr = fObj["styles"].as<JsonArray>();
-      family.styles.reserve(stylesArr.size());
-      for (JsonVariant s : stylesArr) {
-        family.styles.push_back(s.as<std::string>());
-      }
-
+      // vector already did this; the inner one did not, and on the current
+      // release that cost 203 growth events together with the styles vector
+      // that is now gone -- each one a fresh block, a copy of every element,
+      // and a free of the old block.
       JsonArray filesArr = fObj["files"].as<JsonArray>();
       family.files.reserve(filesArr.size());
       family.totalSize = 0;
@@ -358,6 +353,54 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     cancelRequested_ = false;
   }
   requestUpdateAndWait();
+
+  // The second gate, and the one burn 17 proved was missing. The transfer that
+  // failed got an HTTP 200 and 63,188 of 2,544,893 bytes before the stream
+  // ended, with a 14,324-byte largest block at the first body byte. The chain
+  // is in the code: GetInputData calls GrowInputBuffer, which returns MEMORY_E
+  // when XMALLOC fails; ProcessReply propagates it; wolfSSL_read returns -1;
+  // SecureClient::read clears _connected and returns -1; readFixed sees
+  // n <= 0 with !connected() and returns false; _bodyComplete stays false and
+  // the request is reported as a short body. Nothing in that chain is wrong --
+  // the transfer did fail -- but the only record of WHY is a Serial.printf of
+  // the wolfSSL error code, and serial is not available on this device.
+  //
+  // Thresholds are upstream's (src/network/HttpDownloader.h on develop:
+  // MIN_TLS_FREE_HEAP 40000, MIN_TLS_MAX_ALLOC 20000). They are used unchanged
+  // and NOT lowered, although our record buffer is capped at a measured 2,065
+  // bytes by HAVE_MAX_FRAGMENT while upstream's comment still prices it at
+  // ~17KB. The reason is that our own measurement argues against a lower bar,
+  // not for one: burn 17 failed with a 14,324-byte largest block, which a
+  // 2KB-capped record buffer should have fitted several times over. Something
+  // else in that path wants more than the cap explains, and until it is
+  // identified there is no measured basis for going below 20,000.
+  constexpr uint32_t MIN_FREE_FOR_FAMILY = 40000;
+  constexpr uint32_t MIN_MAX_BLOCK_FOR_FAMILY = 20000;
+  const uint32_t freeHeap = ESP.getFreeHeap();
+  const uint32_t maxBlock = ESP.getMaxAllocHeap();
+  if (freeHeap < MIN_FREE_FOR_FAMILY || maxBlock < MIN_MAX_BLOCK_FOR_FAMILY) {
+    char detail[96];
+    snprintf(detail, sizeof(detail), "rejected need=%u/%u", (unsigned)MIN_FREE_FOR_FAMILY,
+             (unsigned)MIN_MAX_BLOCK_FOR_FAMILY);
+    heapdiag::sample("dl-gate", detail);
+    LOG_ERR("FONT", "Low heap for family download (free=%u max=%u) -- restarting", (unsigned)freeHeap,
+            (unsigned)maxBlock);
+
+    // Restart rather than refuse. Refusing leaves the reader where they were,
+    // with the same heap, and the next attempt fails identically; a restart
+    // returns the device to roughly 137,000 free and 114,676 contiguous, which
+    // is the only state these downloads have ever been observed to complete
+    // from. The cost is the session, and the session was not going to finish.
+    //
+    // It lands on Home, not back here: there is no silentRestartTo* target for
+    // the font screen (SilentRestart.h offers Home, the open book and file
+    // transfer). So say why before going, or this is indistinguishable from the
+    // device simply dropping back to the shelf.
+    GUI.drawPopup(renderer, tr(STR_FONT_LOW_MEMORY_RESTART));
+    delay(1500);
+    silentRestart();  // does not return
+    return;
+  }
 
   if (!fontInstaller_.ensureFamilyDir(family.name.c_str())) {
     RenderLock lock(*this);

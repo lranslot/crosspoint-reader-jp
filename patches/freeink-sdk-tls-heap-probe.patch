@@ -37,7 +37,7 @@ index 8d1ee1e..0f070d3 100644
  
  }  // namespace freeink
 diff --git a/libs/network/SecureNet/src/SecureClient.cpp b/libs/network/SecureNet/src/SecureClient.cpp
-index 26d3abc..43b028c 100644
+index 26d3abc..2aeffda 100644
 --- a/libs/network/SecureNet/src/SecureClient.cpp
 +++ b/libs/network/SecureNet/src/SecureClient.cpp
 @@ -5,6 +5,10 @@
@@ -188,7 +188,24 @@ index 26d3abc..43b028c 100644
  
    const int err = wolfSSL_get_error(ssl, n);
    if (isWantIo(err)) return 0;
-@@ -201,10 +310,19 @@ int SecureClient::available() {
+@@ -190,6 +299,16 @@ int SecureClient::read(uint8_t* buf, size_t size) {
+   // A mid-stream failure is invisible to callers (they just see the connection
+   // die); the error code distinguishes an OOM (MEMORY_E -125) from a peer
+   // drop or MAC failure.
++  //
++  // It goes through the heap probe as well as Serial, because on the device
++  // this matters to there is no serial port: burn 17 reported a short body and
++  // left no record of whether the stream was lost to an allocation failure or
++  // to the peer. err=-125 is MEMORY_E.
++  if (g_heapProbe) {
++    char detail[64];
++    snprintf(detail, sizeof(detail), "err=%d (MEMORY_E is -125)", err);
++    g_heapProbe("tls-read-failed", detail);
++  }
+   if (Serial) Serial.printf("[SecureClient] read failed: %d, free heap %u\n", err, (unsigned)ESP.getFreeHeap());
+   _connected = false;
+   return -1;
+@@ -201,10 +320,19 @@ int SecureClient::available() {
  }
  
  void SecureClient::stop() {
@@ -208,7 +225,7 @@ index 26d3abc..43b028c 100644
  }
  
  uint8_t SecureClient::connected() { return _connected && _transport.connected(); }
-@@ -222,6 +340,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
+@@ -222,6 +350,9 @@ int SecureClient::read(uint8_t* buf, size_t size) { (void)buf; (void)size; retur
  int SecureClient::available() { return 0; }
  void SecureClient::stop() { _transport.stop(); _connected = false; }
  uint8_t SecureClient::connected() { return 0; }
